@@ -56,8 +56,8 @@ class AuctionService:
 
     async def create_auction(self, creator_id: int, title: str, start_price: float, 
                            duration_hours: int, description: Optional[str] = None,
-                           photo_url: Optional[str] = None,
-                           initial_leader_username: Optional[str] = None) -> UUID:
+                           photo_url: Optional[str] = None, media_type: str = 'photo',
+                           custom_message: Optional[str] = None) -> UUID:
         """Create a new auction - active if no active auctions, scheduled otherwise"""
         auction_id = uuid4()
         
@@ -81,6 +81,8 @@ class AuctionService:
             title=title,
             description=description,
             photo_url=photo_url,
+            media_type=media_type,
+            custom_message=custom_message,
             start_price=start_price,
             current_price=start_price,
             status=status,
@@ -89,8 +91,7 @@ class AuctionService:
             bids=[],
             created_at=datetime.now(),
             start_time=start_time,
-            end_time=end_time,
-            initial_leader_username=initial_leader_username
+            end_time=end_time
         )
         
         await self.auction_repo.save_auction(auction)
@@ -104,6 +105,9 @@ class AuctionService:
         
         auction.status = AuctionStatus.ACTIVE
         await self.auction_repo.update_auction(auction)
+        
+        # Notify users about new auction
+        await self.notification_service.notify_auction_started(auction)
         return True
 
     async def get_current_auction(self) -> Optional[Auction]:
@@ -123,7 +127,7 @@ class AuctionService:
             return False
         
         user = await self.user_repo.get_user(user_id)
-        if not user:
+        if not user or user.is_blocked:
             return False
         
         if user_id not in auction.participants:
@@ -138,14 +142,14 @@ class AuctionService:
         if not auction or not auction.is_active:
             return False
         
+        user = await self.user_repo.get_user(user_id)
+        if not user or user.is_blocked:
+            return False
+        
         if user_id not in auction.participants:
             return False
         
         if amount <= auction.current_price:
-            return False
-        
-        user = await self.user_repo.get_user(user_id)
-        if not user:
             return False
         
         # Remember previous leader
@@ -273,7 +277,14 @@ class TelegramNotificationService:
         message = f"🏁 Аукцион *{auction.title}* завершён!\n\n"
         
         if winner:
-            message += f"🏆 Победитель: {winner.username}\n"
+            # Get winner display name
+            if self.user_repo:
+                winner_user = await self.user_repo.get_user(winner.user_id)
+                winner_name = winner_user.display_name if winner_user else winner.username
+            else:
+                winner_name = winner.username
+            
+            message += f"🏆 Победитель: {winner_name}\n"
             message += f"💰 Итоговая ставка: *{winner.amount:,.0f}₽*\n"
         else:
             message += "❌ Ставок не было\n"
@@ -292,51 +303,108 @@ class TelegramNotificationService:
             except Exception as e:
                 logging.error(f"Failed to notify participant {participant_id}: {e}")
 
-    async def broadcast_current_auction(self, auction: Auction, user_id: int) -> None:
-        """Send current auction to specific user"""
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
-        message = self._format_auction_message(auction)
-        keyboard = self._get_auction_keyboard(auction.auction_id, user_id in auction.participants)
-        
-        try:
-            await self.application.bot.send_message(
-                chat_id=user_id,
-                text=message,
-                reply_markup=keyboard,
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logging.error(f"Failed to send auction to user {user_id}: {e}")
-
     async def notify_auction_started(self, auction: Auction) -> None:
         """Notify all users about new auction"""
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         
-        message = f"🎉 *Новый аукцион начался!*\n\n" + self._format_auction_message(auction)
+        welcome_msg = auction.custom_message or "🎉 *Новый аукцион начался!*"
+        auction_message = await self._format_auction_message(auction)
         keyboard = self._get_auction_keyboard(auction.auction_id)
         
-        # Get all users and send notification
-        # Note: This requires access to user repository
-        # For now, we'll broadcast to auction participants from previous auctions
-        all_participants = set()
-        completed_auctions = []  # We would need method to get completed auctions
+        # Get all users
+        if self.user_repo:
+            all_users = await self.user_repo.get_all_users()
+            
+            for user in all_users:
+                if user.is_blocked or user.is_admin:
+                    continue
+                
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=user.user_id,
+                        text=welcome_msg,
+                        parse_mode='Markdown'
+                    )
+                    
+                    if auction.photo_url:
+                        if auction.media_type == 'photo':
+                            await self.application.bot.send_photo(
+                                chat_id=user.user_id,
+                                photo=auction.photo_url,
+                                caption=auction_message,
+                                parse_mode='Markdown',
+                                reply_markup=keyboard
+                            )
+                        elif auction.media_type == 'video':
+                            await self.application.bot.send_video(
+                                chat_id=user.user_id,
+                                video=auction.photo_url,
+                                caption=auction_message,
+                                parse_mode='Markdown',
+                                reply_markup=keyboard
+                            )
+                        elif auction.media_type == 'animation':
+                            await self.application.bot.send_animation(
+                                chat_id=user.user_id,
+                                animation=auction.photo_url,
+                                caption=auction_message,
+                                parse_mode='Markdown',
+                                reply_markup=keyboard
+                            )
+                    else:
+                        await self.application.bot.send_message(
+                            chat_id=user.user_id,
+                            text=auction_message,
+                            parse_mode='Markdown',
+                            reply_markup=keyboard
+                        )
+                except Exception as e:
+                    logging.error(f"Failed to notify user {user.user_id} about new auction: {e}")
+
+    async def broadcast_current_auction(self, auction: Auction, user_id: int) -> None:
+        """Send current auction to specific user"""
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
         
-        for completed_auction in completed_auctions:
-            all_participants.update(completed_auction.participants)
+        message = await self._format_auction_message(auction)
+        keyboard = self._get_auction_keyboard(auction.auction_id, user_id in auction.participants)
         
-        for user_id in all_participants:
-            try:
+        try:
+            if auction.photo_url:
+                if auction.media_type == 'photo':
+                    await self.application.bot.send_photo(
+                        chat_id=user_id,
+                        photo=auction.photo_url,
+                        caption=message,
+                        parse_mode='Markdown',
+                        reply_markup=keyboard
+                    )
+                elif auction.media_type == 'video':
+                    await self.application.bot.send_video(
+                        chat_id=user_id,
+                        video=auction.photo_url,
+                        caption=message,
+                        parse_mode='Markdown',
+                        reply_markup=keyboard
+                    )
+                elif auction.media_type == 'animation':
+                    await self.application.bot.send_animation(
+                        chat_id=user_id,
+                        animation=auction.photo_url,
+                        caption=message,
+                        parse_mode='Markdown',
+                        reply_markup=keyboard
+                    )
+            else:
                 await self.application.bot.send_message(
                     chat_id=user_id,
                     text=message,
                     reply_markup=keyboard,
                     parse_mode='Markdown'
                 )
-            except Exception as e:
-                logging.error(f"Failed to notify user {user_id} about new auction: {e}")
+        except Exception as e:
+            logging.error(f"Failed to send auction to user {user_id}: {e}")
 
-    def _format_auction_message(self, auction: Auction) -> str:
+    async def _format_auction_message(self, auction: Auction) -> str:
         """Format auction information message"""
         message = f"🎯 *{auction.title}*\n\n"
         
@@ -347,10 +415,13 @@ class TelegramNotificationService:
         
         leader = auction.current_leader
         if leader:
-            # Try to get user display name
-            message += f"👤 Лидер: {leader.username}\n"
-        elif auction.initial_leader_username:
-            message += f"👤 Лидер: {auction.initial_leader_username}\n"
+            # Get user display name if possible
+            if self.user_repo:
+                leader_user = await self.user_repo.get_user(leader.user_id)
+                leader_name = leader_user.display_name if leader_user else leader.username
+            else:
+                leader_name = leader.username
+            message += f"👤 Лидер: {leader_name}\n"
         
         message += f"👥 Участников: {len(auction.participants)}\n"
         message += f"📊 Ставок: {len(auction.bids)}\n"
@@ -379,12 +450,13 @@ class TelegramNotificationService:
             keyboard.append([InlineKeyboardButton("💸 Перебить ставку", callback_data=f"bid_{auction_id}")])
         
         keyboard.append([InlineKeyboardButton("ℹ️ Обновить статус", callback_data=f"status_{auction_id}")])
+        keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
         
         return InlineKeyboardMarkup(keyboard)
 
 
 class AuctionScheduler:
-    """Scheduler for automatic auction ending"""
+    """Scheduler for automatic auction ending and activation"""
     
     def __init__(self, auction_service: AuctionService, auction_repo: AuctionRepository):
         self.auction_service = auction_service
@@ -397,6 +469,7 @@ class AuctionScheduler:
         while self.running:
             try:
                 await self._check_expired_auctions()
+                await self._check_scheduled_auctions()
                 await asyncio.sleep(60)  # Check every minute
             except Exception as e:
                 logging.error(f"Scheduler error: {e}")
@@ -407,8 +480,7 @@ class AuctionScheduler:
         self.running = False
 
     async def _check_expired_auctions(self):
-        """Check and end expired auctions, activate scheduled ones"""
-        # Check expired active auctions
+        """Check and end expired auctions"""
         auctions = await self.auction_repo.get_active_auctions()
         now = datetime.now()
         
@@ -422,139 +494,16 @@ class AuctionScheduler:
                 await self.auction_repo.update_auction(auction)
                 await self.auction_service.notification_service.notify_auction_ended(auction)
                 logging.info(f"Auto-ended auction: {auction.title}")
-        
-        # Check if we need to activate scheduled auctions
+
+    async def _check_scheduled_auctions(self):
+        """Check if we need to activate scheduled auctions"""
         active_auctions = await self.auction_repo.get_active_auctions()
         if not active_auctions:  # No active auctions
             scheduled_auctions = await self.auction_repo.get_scheduled_auctions()
             if scheduled_auctions:
                 # Activate the first scheduled auction
                 next_auction = scheduled_auctions[0]
+                now = datetime.now()
                 if now >= next_auction.start_time:
                     await self.auction_service.activate_scheduled_auction(next_auction.auction_id)
                     logging.info(f"Auto-activated scheduled auction: {next_auction.title}")
-                    
-                    # Notify all users about new auction
-                    await self.auction_service.notification_service.notify_auction_started(next_auction) + f"🎉 *Новый аукцион начался!*\n\n" + self._format_auction_message(auction)
-        keyboard = self._get_auction_keyboard(auction.auction_id)
-        
-        # Get all users and send notification
-        # Note: This requires access to user repository
-        # For now, we'll broadcast to auction participants from previous auctions
-        all_participants = set()
-        completed_auctions = []  # We would need method to get completed auctions
-        
-        for completed_auction in completed_auctions:
-            all_participants.update(completed_auction.participants)
-        
-        for user_id in all_participants:
-            try:
-                await self.application.bot.send_message(
-                    chat_id=user_id,
-                    text=message,
-                    reply_markup=keyboard,
-                    parse_mode='Markdown'
-                )
-            except Exception as e:
-                logging.error(f"Failed to notify user {user_id} about new auction: {e}")
-
-    def _format_auction_message(self, auction: Auction) -> str:
-        """Format auction information message"""
-        message = f"🎯 *{auction.title}*\n\n"
-        
-        if auction.description:
-            message += f"📄 {auction.description}\n\n"
-        
-        message += f"💰 Текущая цена: *{auction.current_price:,.0f}₽*\n"
-        
-        leader = auction.current_leader
-        if leader:
-            # Try to get user display name
-            message += f"👤 Лидер: {leader.username}\n"
-        elif auction.initial_leader_username:
-            message += f"👤 Лидер: {auction.initial_leader_username}\n"
-        
-        message += f"👥 Участников: {len(auction.participants)}\n"
-        message += f"📊 Ставок: {len(auction.bids)}\n"
-        
-        if auction.is_scheduled:
-            if auction.time_until_start:
-                message += f"⏰ Начнется через: {auction.time_until_start}\n"
-            else:
-                message += "⏰ Готов к запуску\n"
-        elif auction.time_remaining:
-            message += f"⏰ Осталось: {auction.time_remaining}\n"
-        else:
-            message += "⏰ Бессрочный\n"
-        
-        return message
-
-    def _get_auction_keyboard(self, auction_id: UUID, is_participant: bool = False) -> 'InlineKeyboardMarkup':
-        """Generate auction inline keyboard"""
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
-        keyboard = []
-        
-        if not is_participant:
-            keyboard.append([InlineKeyboardButton("✅ Участвовать", callback_data=f"join_{auction_id}")])
-        else:
-            keyboard.append([InlineKeyboardButton("💸 Перебить ставку", callback_data=f"bid_{auction_id}")])
-        
-        keyboard.append([InlineKeyboardButton("ℹ️ Обновить статус", callback_data=f"status_{auction_id}")])
-        
-        return InlineKeyboardMarkup(keyboard)
-
-
-class AuctionScheduler:
-    """Scheduler for automatic auction ending"""
-    
-    def __init__(self, auction_service: AuctionService, auction_repo: AuctionRepository):
-        self.auction_service = auction_service
-        self.auction_repo = auction_repo
-        self.running = False
-
-    async def start(self):
-        """Start the scheduler loop"""
-        self.running = True
-        while self.running:
-            try:
-                await self._check_expired_auctions()
-                await asyncio.sleep(60)  # Check every minute
-            except Exception as e:
-                logging.error(f"Scheduler error: {e}")
-                await asyncio.sleep(60)
-
-    async def stop(self):
-        """Stop the scheduler"""
-        self.running = False
-
-    async def _check_expired_auctions(self):
-        """Check and end expired auctions, activate scheduled ones"""
-        # Check expired active auctions
-        auctions = await self.auction_repo.get_active_auctions()
-        now = datetime.now()
-        
-        for auction in auctions:
-            if auction.end_time and now >= auction.end_time:
-                auction.status = AuctionStatus.COMPLETED
-                leader = auction.current_leader
-                if leader:
-                    auction.winner_id = leader.user_id
-                
-                await self.auction_repo.update_auction(auction)
-                await self.auction_service.notification_service.notify_auction_ended(auction)
-                logging.info(f"Auto-ended auction: {auction.title}")
-        
-        # Check if we need to activate scheduled auctions
-        active_auctions = await self.auction_repo.get_active_auctions()
-        if not active_auctions:  # No active auctions
-            scheduled_auctions = await self.auction_repo.get_scheduled_auctions()
-            if scheduled_auctions:
-                # Activate the first scheduled auction
-                next_auction = scheduled_auctions[0]
-                if now >= next_auction.start_time:
-                    await self.auction_service.activate_scheduled_auction(next_auction.auction_id)
-                    logging.info(f"Auto-activated scheduled auction: {next_auction.title}")
-                    
-                    # Notify all users about new auction
-                    await self.auction_service.notification_service.notify_auction_started(next_auction)

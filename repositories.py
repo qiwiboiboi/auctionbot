@@ -15,6 +15,8 @@ class UserRepository(Protocol):
     async def save_user(self, user: User) -> None: ...
     async def get_user(self, user_id: int) -> Optional[User]: ...
     async def get_user_by_username(self, username: str) -> Optional[User]: ...
+    async def get_all_users(self) -> List[User]: ...
+    async def update_user_status(self, user_id: int, is_blocked: bool) -> None: ...
 
 
 class AuctionRepository(Protocol):
@@ -23,6 +25,7 @@ class AuctionRepository(Protocol):
     async def get_auction(self, auction_id: UUID) -> Optional[Auction]: ...
     async def get_active_auctions(self) -> List[Auction]: ...
     async def get_scheduled_auctions(self) -> List[Auction]: ...
+    async def get_completed_auctions(self) -> List[Auction]: ...
     async def update_auction(self, auction: Auction) -> None: ...
 
 
@@ -43,6 +46,7 @@ class SQLiteUserRepository:
                     first_name TEXT,
                     last_name TEXT,
                     is_admin BOOLEAN DEFAULT FALSE,
+                    is_blocked BOOLEAN DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
@@ -52,11 +56,11 @@ class SQLiteUserRepository:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO users 
-                (user_id, username, telegram_handle, first_name, last_name, is_admin, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                (user_id, username, telegram_handle, first_name, last_name, is_admin, is_blocked, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user.user_id, user.username, user.telegram_handle,
-                user.first_name, user.last_name, user.is_admin,
+                user.first_name, user.last_name, user.is_admin, user.is_blocked,
                 user.created_at.isoformat()
             ))
             await db.commit()
@@ -74,6 +78,7 @@ class SQLiteUserRepository:
                         first_name=row['first_name'],
                         last_name=row['last_name'],
                         is_admin=bool(row['is_admin']),
+                        is_blocked=bool(row.get('is_blocked', False)),
                         created_at=datetime.fromisoformat(row['created_at'])
                     )
                 return None
@@ -91,9 +96,31 @@ class SQLiteUserRepository:
                         first_name=row['first_name'],
                         last_name=row['last_name'],
                         is_admin=bool(row['is_admin']),
+                        is_blocked=bool(row.get('is_blocked', False)),
                         created_at=datetime.fromisoformat(row['created_at'])
                     )
                 return None
+
+    async def get_all_users(self) -> List[User]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM users ORDER BY created_at DESC") as cursor:
+                rows = await cursor.fetchall()
+                return [User(
+                    user_id=row['user_id'],
+                    username=row['username'],
+                    telegram_handle=row['telegram_handle'],
+                    first_name=row['first_name'],
+                    last_name=row['last_name'],
+                    is_admin=bool(row['is_admin']),
+                    is_blocked=bool(row.get('is_blocked', False)),
+                    created_at=datetime.fromisoformat(row['created_at'])
+                ) for row in rows]
+
+    async def update_user_status(self, user_id: int, is_blocked: bool) -> None:
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE users SET is_blocked = ? WHERE user_id = ?", (is_blocked, user_id))
+            await db.commit()
 
 
 class SQLiteAuctionRepository:
@@ -105,12 +132,16 @@ class SQLiteAuctionRepository:
     async def init_db(self):
         """Initialize database tables"""
         async with aiosqlite.connect(self.db_path) as db:
+            # Drop old table if exists and recreate with correct schema
+            await db.execute("DROP TABLE IF EXISTS auctions")
             await db.execute("""
-                CREATE TABLE IF NOT EXISTS auctions (
+                CREATE TABLE auctions (
                     auction_id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     description TEXT,
                     photo_url TEXT,
+                    media_type TEXT DEFAULT 'photo',
+                    custom_message TEXT,
                     start_price REAL NOT NULL,
                     current_price REAL NOT NULL,
                     status TEXT NOT NULL,
@@ -120,8 +151,7 @@ class SQLiteAuctionRepository:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     start_time TIMESTAMP,
                     end_time TIMESTAMP,
-                    winner_id INTEGER,
-                    initial_leader_username TEXT
+                    winner_id INTEGER
                 )
             """)
             await db.commit()
@@ -130,14 +160,13 @@ class SQLiteAuctionRepository:
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO auctions 
-                (auction_id, title, description, photo_url, start_price, current_price, 
-                 status, creator_id, participants, bids, created_at, start_time, end_time, 
-                 winner_id, initial_leader_username)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (auction_id, title, description, photo_url, media_type, custom_message, start_price, current_price, 
+                 status, creator_id, participants, bids, created_at, start_time, end_time, winner_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(auction.auction_id), auction.title, auction.description, auction.photo_url,
-                auction.start_price, auction.current_price, auction.status.value,
-                auction.creator_id, json.dumps(auction.participants),
+                auction.media_type, auction.custom_message, auction.start_price, auction.current_price, 
+                auction.status.value, auction.creator_id, json.dumps(auction.participants),
                 json.dumps([{
                     'bid_id': str(bid.bid_id),
                     'auction_id': str(bid.auction_id),
@@ -149,7 +178,7 @@ class SQLiteAuctionRepository:
                 auction.created_at.isoformat(),
                 auction.start_time.isoformat() if auction.start_time else None,
                 auction.end_time.isoformat() if auction.end_time else None,
-                auction.winner_id, auction.initial_leader_username
+                auction.winner_id
             ))
             await db.commit()
 
@@ -176,6 +205,13 @@ class SQLiteAuctionRepository:
                 rows = await cursor.fetchall()
                 return [self._row_to_auction(row) for row in rows]
 
+    async def get_completed_auctions(self) -> List[Auction]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM auctions WHERE status = ? ORDER BY created_at DESC LIMIT 50", (AuctionStatus.COMPLETED.value,)) as cursor:
+                rows = await cursor.fetchall()
+                return [self._row_to_auction(row) for row in rows]
+
     async def update_auction(self, auction: Auction) -> None:
         await self.save_auction(auction)
 
@@ -198,6 +234,8 @@ class SQLiteAuctionRepository:
             title=row['title'],
             description=row['description'],
             photo_url=row['photo_url'],
+            media_type=row.get('media_type', 'photo'),
+            custom_message=row.get('custom_message'),
             start_price=row['start_price'],
             current_price=row['current_price'],
             status=AuctionStatus(row['status']),
@@ -207,8 +245,7 @@ class SQLiteAuctionRepository:
             created_at=datetime.fromisoformat(row['created_at']),
             start_time=datetime.fromisoformat(row['start_time']) if row['start_time'] else None,
             end_time=datetime.fromisoformat(row['end_time']) if row['end_time'] else None,
-            winner_id=row['winner_id'],
-            initial_leader_username=row['initial_leader_username']
+            winner_id=row['winner_id']
         )
 
 
@@ -231,6 +268,13 @@ class InMemoryUserRepository:
         user_id = self._usernames.get(username)
         return self._users.get(user_id) if user_id else None
 
+    async def get_all_users(self) -> List[User]:
+        return list(self._users.values())
+
+    async def update_user_status(self, user_id: int, is_blocked: bool) -> None:
+        if user_id in self._users:
+            self._users[user_id].is_blocked = is_blocked
+
 
 class InMemoryAuctionRepository:
     """In-memory implementation of auction repository"""
@@ -249,6 +293,9 @@ class InMemoryAuctionRepository:
 
     async def get_scheduled_auctions(self) -> List[Auction]:
         return [a for a in self._auctions.values() if a.status == AuctionStatus.SCHEDULED]
+
+    async def get_completed_auctions(self) -> List[Auction]:
+        return [a for a in self._auctions.values() if a.status == AuctionStatus.COMPLETED]
 
     async def update_auction(self, auction: Auction) -> None:
         self._auctions[auction.auction_id] = auction

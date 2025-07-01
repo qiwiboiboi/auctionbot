@@ -15,7 +15,7 @@ class AuctionStatus(Enum):
     ACTIVE = "active"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
-    SCHEDULED = "scheduled"  # Добавляем статус для отложенных аукционов
+    SCHEDULED = "scheduled"
 
 
 @dataclass
@@ -24,9 +24,10 @@ class User:
     user_id: int
     username: str
     telegram_handle: Optional[str] = None
-    first_name: Optional[str] = None  # Добавляем имя пользователя
-    last_name: Optional[str] = None   # Добавляем фамилию пользователя
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     is_admin: bool = False
+    is_blocked: bool = False
     created_at: datetime = field(default_factory=datetime.now)
     
     @property
@@ -57,6 +58,8 @@ class Auction:
     title: str
     description: Optional[str]
     photo_url: Optional[str]
+    media_type: str
+    custom_message: Optional[str]
     start_price: float
     current_price: float
     status: AuctionStatus
@@ -66,8 +69,7 @@ class Auction:
     created_at: datetime
     end_time: Optional[datetime] = None
     winner_id: Optional[int] = None
-    initial_leader_username: Optional[str] = None
-    start_time: Optional[datetime] = None  # Добавляем время начала для отложенных аукционов
+    start_time: Optional[datetime] = None
 
     @property
     def current_leader(self) -> Optional[Bid]:

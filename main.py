@@ -38,7 +38,6 @@ async def main():
     application = bot.create_application(token)
     
     # Create and start scheduler
-    scheduler_interval = int(os.getenv('SCHEDULER_INTERVAL', '60'))
     scheduler = AuctionScheduler(bot.auction_service, bot.auction_repo)
     scheduler_task = asyncio.create_task(scheduler.start())
     

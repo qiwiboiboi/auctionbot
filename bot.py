@@ -64,7 +64,8 @@ class TelegramBot:
         register_conv = ConversationHandler(
             entry_points=[
                 CommandHandler('register', self.handlers.register_start),
-                CallbackQueryHandler(self.handlers.register_and_join, pattern=r'^register_join_')
+                CallbackQueryHandler(self.handlers.register_username, pattern=r'^register_join_'),
+                CallbackQueryHandler(self.handlers.register_username, pattern=r'^register_start_')
             ],
             states={
                 BotStates.REGISTER_USERNAME: [
@@ -91,8 +92,14 @@ class TelegramBot:
                 BotStates.CREATE_DESCRIPTION: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.create_description)
                 ],
-                BotStates.CREATE_INITIAL_LEADER: [
-                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.create_initial_leader)
+                BotStates.CREATE_MEDIA: [
+                    MessageHandler(
+                        (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.ANIMATION) & ~filters.COMMAND, 
+                        self.handlers.create_media
+                    )
+                ],
+                BotStates.CREATE_CUSTOM_MESSAGE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.create_custom_message)
                 ]
             },
             fallbacks=[
@@ -125,10 +132,8 @@ class TelegramBot:
         # Command handlers
         application.add_handler(CommandHandler('start', self.handlers.start))
         
+        # Callback query handlers - handle all callbacks through one handler
+        application.add_handler(CallbackQueryHandler(self.handlers.handle_callback))
+        
         # Text message handlers for keyboard buttons
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.handle_text))
-        
-        # Callback query handlers
-        application.add_handler(CallbackQueryHandler(self.handlers.join_auction, pattern=r'^join_'))
-        application.add_handler(CallbackQueryHandler(self.handlers.show_status, pattern=r'^status_'))
-        application.add_handler(CallbackQueryHandler(self.handlers.end_auction_callback, pattern=r'^end_auction_'))
