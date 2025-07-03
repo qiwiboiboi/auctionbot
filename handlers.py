@@ -40,7 +40,7 @@ class TelegramHandlers:
         keyboard = [
             [KeyboardButton("➕ Создать аукцион"), KeyboardButton("🏁 Завершить аукцион")],
             [KeyboardButton("📊 Статус аукционов"), KeyboardButton("📋 Отложенные аукционы")],
-            [KeyboardButton("👥 Список пользователей"), KeyboardButton("⚙️ Настройки")]
+            [KeyboardButton("👥 Список пользователей"),]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
@@ -122,7 +122,10 @@ class TelegramHandlers:
         if current_auction:
             auction_message = await self._format_auction_message(current_auction)
             keyboard = self._get_auction_keyboard(current_auction.auction_id, user.user_id in current_auction.participants)
-            keyboard.inline_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
+            # Create new keyboard with additional button
+            new_keyboard = list(keyboard.inline_keyboard)
+            new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
+            keyboard = InlineKeyboardMarkup(new_keyboard)
             
             # Send media if available
             if current_auction.photo_url:
@@ -193,8 +196,6 @@ class TelegramHandlers:
             await self.show_scheduled_auctions(update, context)
         elif text == "👥 Список пользователей" and user.is_admin:
             await self.show_users(update, context)
-        elif text == "⚙️ Настройки" and user.is_admin:
-            await self.show_admin_settings(update, context)
         elif text == "❌ Отмена":
             await self.cancel(update, context)
         else:
@@ -218,7 +219,11 @@ class TelegramHandlers:
         
         if data == "main_menu":
             keyboard = self.get_main_menu_keyboard()
-            await query.edit_message_text("📱 *Главное меню*\n\nВыберите действие:", parse_mode='Markdown', reply_markup=keyboard)
+            try:
+                await query.edit_message_text("📱 *Главное меню*\n\nВыберите действие:", parse_mode='Markdown', reply_markup=keyboard)
+            except Exception:
+                # If can't edit (e.g. media message), send new message
+                await query.message.reply_text("📱 *Главное меню*\n\nВыберите действие:", parse_mode='Markdown', reply_markup=keyboard)
         
         elif data == "menu_current_auction":
             await self.show_current_auction_callback(query, context)
@@ -235,11 +240,17 @@ class TelegramHandlers:
         elif data.startswith("register_join_"):
             auction_id = UUID(data.split('_')[2])
             context.user_data['join_auction_id'] = auction_id
-            await query.edit_message_text("📝 Введите желаемый логин (только буквы, цифры и _):")
+            try:
+                await query.edit_message_text("📝 Введите желаемый логин (только буквы, цифры и _):")
+            except Exception:
+                await query.message.reply_text("📝 Введите желаемый логин (только буквы, цифры и _):")
             return BotStates.REGISTER_USERNAME
         
         elif data == "register_start":
-            await query.edit_message_text("📝 Введите желаемый логин (только буквы, цифры и _):")
+            try:
+                await query.edit_message_text("📝 Введите желаемый логин (только буквы, цифры и _):")
+            except Exception:
+                await query.message.reply_text("📝 Введите желаемый логин (только буквы, цифры и _):")
             return BotStates.REGISTER_USERNAME
         
         elif data.startswith("join_"):
@@ -261,12 +272,45 @@ class TelegramHandlers:
             await self.toggle_user_block(update, context)
         
         elif data == "cancel_end":
-            await query.edit_message_text("❌ Завершение аукциона отменено")
+            try:
+                await query.edit_message_text("❌ Завершение аукциона отменено")
+            except Exception:
+                await query.message.reply_text("❌ Завершение аукциона отменено")
+        
+        elif data == "back_to_users":
+            # Recreate users list
+            await self.show_users_callback(query, context)
+        
+        elif data == "cancel_users":
+            try:
+                await query.edit_message_text("✅ Закрыто")
+            except Exception:
+                await query.message.reply_text("✅ Закрыто")
 
     # ============ REGISTRATION HANDLERS ============
 
     async def register_username(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle username input"""
+        # Handle callback query first (from inline buttons)
+        if update.callback_query:
+            query = update.callback_query
+            await query.answer()
+            
+            # Check which callback was pressed
+            if query.data.startswith("register_join_"):
+                auction_id = UUID(query.data.split('_')[2])
+                context.user_data['join_auction_id'] = auction_id
+                await query.edit_message_text("📝 Введите желаемый логин (только буквы, цифры и _):")
+                return BotStates.REGISTER_USERNAME
+            elif query.data == "register_start":
+                await query.edit_message_text("📝 Введите желаемый логин (только буквы, цифры и _):")
+                return BotStates.REGISTER_USERNAME
+        
+        # Handle text message (username input)
+        if not update.message or not update.message.text:
+            await update.effective_message.reply_text("❌ Пожалуйста, введите текст")
+            return BotStates.REGISTER_USERNAME
+            
         if update.message.text == "❌ Отмена":
             return await self.cancel(update, context)
             
@@ -328,8 +372,97 @@ class TelegramHandlers:
         if current_auction:
             message = await self._format_auction_message(current_auction)
             keyboard = self._get_auction_keyboard(current_auction.auction_id, user_id in current_auction.participants)
-            keyboard.inline_keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
-            await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
+            # Create new keyboard with additional button
+            new_keyboard = list(keyboard.inline_keyboard)
+            new_keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
+            keyboard = InlineKeyboardMarkup(new_keyboard)
+            
+            try:
+                await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
+            except Exception:
+                await query.message.reply_text(message, reply_markup=keyboard, parse_mode='Markdown')
+        else:
+            next_auction = await self.auction_service.get_next_scheduled_auction()
+            if next_auction:
+                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction)
+            else:
+                message = "📭 Сейчас нет активных аукционов"
+            
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
+            try:
+                await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
+            except Exception:
+                await query.message.reply_text(message, parse_mode='Markdown', reply_markup=keyboard)
+
+    async def show_profile_callback(self, query, context):
+        """Show user profile from callback"""
+        status = await self.auction_service.get_user_status(query.from_user.id)
+        
+        if not status["registered"]:
+            await query.edit_message_text("❌ Ошибка получения профиля")
+            return
+        
+        user = status["user"]
+        message = f"👤 *Ваш профиль*\n\n"
+        message += f"Логин: {user.username}\n"
+        message += f"Имя: {user.display_name}\n"
+        message += f"Статус: {'👑 Администратор' if user.is_admin else '👤 Участник'}\n"
+        message += f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        
+        if status["participating_in"]:
+            message += "📊 *Участие в аукционах:*\n"
+            for participation in status["participating_in"]:
+                auction = participation["auction"]
+                user_bid = participation["user_bid"]
+                is_leader = participation["is_leader"]
+                
+                message += f"\n🎯 {auction.title}\n"
+                if user_bid:
+                    message += f"Ваша ставка: {user_bid.amount:,.0f}₽\n"
+                    message += f"Статус: {'🏆 Лидер' if is_leader else '👤 Участник'}\n"
+                else:
+                    message += "Ставок нет\n"
+        else:
+            message += "Вы не участвуете в аукционах"
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
+
+    async def show_history_callback(self, query, context):
+        """Show auction history from callback"""
+        completed_auctions = await self.auction_repo.get_completed_auctions()
+        
+        if not completed_auctions:
+            message = "📭 История аукционов пуста"
+        else:
+            message = "📊 *История аукционов:*\n\n"
+            for auction in completed_auctions[:5]:  # Show last 5
+                message += f"🎯 *{auction.title}*\n"
+                message += f"💰 Итоговая цена: {auction.current_price:,.0f}₽\n"
+                
+                if auction.current_leader:
+                    leader_user = await self.user_repo.get_user(auction.current_leader.user_id)
+                    leader_name = leader_user.display_name if leader_user else auction.current_leader.username
+                    message += f"🏆 Победитель: {leader_name}\n"
+                
+                message += f"📅 {auction.created_at.strftime('%d.%m.%Y')}\n\n"
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
+
+    async def show_help_callback(self, query, context):
+        """Show help from callback"""
+        message = (
+            "ℹ️ *Помощь по боту*\n\n"
+            "🎯 *Текущий аукцион* - показать активный аукцион\n"
+            "👤 *Мой профиль* - ваша информация и статистика\n"
+            "📊 *История* - прошлые аукционы\n\n"
+            "Для участия в аукционе нажмите '✅ Участвовать', "
+            "затем используйте '💸 Перебить ставку' для размещения ставок."
+        )
+        
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
+        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show auction status"""
@@ -511,86 +644,7 @@ class TelegramHandlers:
         
         keyboard.append([InlineKeyboardButton("ℹ️ Обновить статус", callback_data=f"status_{auction_id}")])
         
-        return InlineKeyboardMarkup(keyboard)keyboard, parse_mode='Markdown')
-        else:
-            next_auction = await self.auction_service.get_next_scheduled_auction()
-            if next_auction:
-                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction)
-            else:
-                message = "📭 Сейчас нет активных аукционов"
-            
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
-            await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
-
-    async def show_profile_callback(self, query, context):
-        """Show user profile from callback"""
-        status = await self.auction_service.get_user_status(query.from_user.id)
-        
-        if not status["registered"]:
-            await query.edit_message_text("❌ Ошибка получения профиля")
-            return
-        
-        user = status["user"]
-        message = f"👤 *Ваш профиль*\n\n"
-        message += f"Логин: {user.username}\n"
-        message += f"Имя: {user.display_name}\n"
-        message += f"Статус: {'👑 Администратор' if user.is_admin else '👤 Участник'}\n"
-        message += f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
-        
-        if status["participating_in"]:
-            message += "📊 *Участие в аукционах:*\n"
-            for participation in status["participating_in"]:
-                auction = participation["auction"]
-                user_bid = participation["user_bid"]
-                is_leader = participation["is_leader"]
-                
-                message += f"\n🎯 {auction.title}\n"
-                if user_bid:
-                    message += f"Ваша ставка: {user_bid.amount:,.0f}₽\n"
-                    message += f"Статус: {'🏆 Лидер' if is_leader else '👤 Участник'}\n"
-                else:
-                    message += "Ставок нет\n"
-        else:
-            message += "Вы не участвуете в аукционах"
-        
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
-
-    async def show_history_callback(self, query, context):
-        """Show auction history from callback"""
-        completed_auctions = await self.auction_repo.get_completed_auctions()
-        
-        if not completed_auctions:
-            message = "📭 История аукционов пуста"
-        else:
-            message = "📊 *История аукционов:*\n\n"
-            for auction in completed_auctions[:5]:  # Show last 5
-                message += f"🎯 *{auction.title}*\n"
-                message += f"💰 Итоговая цена: {auction.current_price:,.0f}₽\n"
-                
-                if auction.current_leader:
-                    leader_user = await self.user_repo.get_user(auction.current_leader.user_id)
-                    leader_name = leader_user.display_name if leader_user else auction.current_leader.username
-                    message += f"🏆 Победитель: {leader_name}\n"
-                
-                message += f"📅 {auction.created_at.strftime('%d.%m.%Y')}\n\n"
-        
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
-
-    async def show_help_callback(self, query, context):
-        """Show help from callback"""
-        message = (
-            "ℹ️ *Помощь по боту*\n\n"
-            "🎯 *Текущий аукцион* - показать активный аукцион\n"
-            "👤 *Мой профиль* - ваша информация и статистика\n"
-            "📊 *История* - прошлые аукционы\n\n"
-            "Для участия в аукционе нажмите '✅ Участвовать', "
-            "затем используйте '💸 Перебить ставку' для размещения ставок."
-        )
-        
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
-        await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
+        return InlineKeyboardMarkup(keyboard)
 
     # ============ ADMIN USER MANAGEMENT ============
 
@@ -618,6 +672,31 @@ class TelegramHandlers:
         keyboard.append([InlineKeyboardButton("❌ Закрыть", callback_data="cancel_users")])
         
         await update.message.reply_text(
+            f"👥 *Пользователи ({len(users)}):*\n\n"
+            "✅ - активный\n🚫 - заблокированный\n👑 - администратор",
+            parse_mode='Markdown',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    async def show_users_callback(self, query, context):
+        """Show users list from callback"""
+        users = await self.user_repo.get_all_users()
+        if not users:
+            await query.edit_message_text("📭 Пользователей нет")
+            return
+        
+        keyboard = []
+        for user_obj in users[:10]:  # Show first 10 users
+            status_emoji = "🚫" if user_obj.is_blocked else "✅"
+            admin_emoji = " 👑" if user_obj.is_admin else ""
+            keyboard.append([InlineKeyboardButton(
+                f"{status_emoji} {user_obj.display_name}{admin_emoji}", 
+                callback_data=f"user_{user_obj.user_id}"
+            )])
+        
+        keyboard.append([InlineKeyboardButton("❌ Закрыть", callback_data="cancel_users")])
+        
+        await query.edit_message_text(
             f"👥 *Пользователи ({len(users)}):*\n\n"
             "✅ - активный\n🚫 - заблокированный\n👑 - администратор",
             parse_mode='Markdown',
@@ -693,10 +772,6 @@ class TelegramHandlers:
                 InlineKeyboardButton("◀️ Назад к списку", callback_data="back_to_users")
             ]])
         )
-
-    async def show_admin_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Show admin settings"""
-        await update.message.reply_text("⚙️ Настройки в разработке")
 
     # ============ AUCTION CREATION HANDLERS ============
 
@@ -921,24 +996,39 @@ class TelegramHandlers:
         
         user = await self.user_repo.get_user(user_id)
         if user and user.is_blocked:
-            await query.edit_message_text("❌ Ваш аккаунт заблокирован и вы не можете участвовать в аукционах")
+            try:
+                await query.edit_message_text("❌ Ваш аккаунт заблокирован и вы не можете участвовать в аукционах")
+            except Exception:
+                await query.message.reply_text("❌ Ваш аккаунт заблокирован и вы не можете участвовать в аукционах")
             return ConversationHandler.END
         
         auction = await self.auction_repo.get_auction(auction_id)
         if not auction or not auction.is_active:
-            await query.edit_message_text("❌ Аукцион неактивен")
+            try:
+                await query.edit_message_text("❌ Аукцион неактивен")
+            except Exception:
+                await query.message.reply_text("❌ Аукцион неактивен")
             return ConversationHandler.END
         
         if user_id not in auction.participants:
-            await query.edit_message_text("❌ Сначала присоединитесь к аукциону")
+            try:
+                await query.edit_message_text("❌ Сначала присоединитесь к аукциону")
+            except Exception:
+                await query.message.reply_text("❌ Сначала присоединитесь к аукциону")
             return ConversationHandler.END
         
         self.bid_contexts[user_id] = auction_id
-        await query.edit_message_text(
+        bid_message = (
             f"💸 Текущая ставка: *{auction.current_price:,.0f}₽*\n\n"
-            f"Введите вашу ставку (больше {auction.current_price:,.0f}₽):",
-            parse_mode='Markdown'
+            f"Введите вашу ставку (больше {auction.current_price:,.0f}₽):"
         )
+        
+        try:
+            await query.edit_message_text(bid_message, parse_mode='Markdown')
+        except Exception:
+            # If can't edit (media message), send new message
+            await query.message.reply_text(bid_message, parse_mode='Markdown')
+        
         return BotStates.PLACE_BID
 
     async def place_bid(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -967,7 +1057,10 @@ class TelegramHandlers:
                 if auction:
                     message = await self._format_auction_message(auction)
                     keyboard = self._get_auction_keyboard(auction_id, True)
-                    keyboard.inline_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
+                    # Create new keyboard with additional button
+                    new_keyboard = list(keyboard.inline_keyboard)
+                    new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
+                    keyboard = InlineKeyboardMarkup(new_keyboard)
                     
                     if auction.photo_url:
                         await self.send_auction_media(update, auction, message, keyboard)
@@ -1003,11 +1096,17 @@ class TelegramHandlers:
         
         user = await self.user_repo.get_user(user_id)
         if not user:
-            await query.edit_message_text("❌ Сначала зарегистрируйтесь командой /start")
+            try:
+                await query.edit_message_text("❌ Сначала зарегистрируйтесь командой /start")
+            except Exception:
+                await query.message.reply_text("❌ Сначала зарегистрируйтесь командой /start")
             return
         
         if user.is_blocked:
-            await query.edit_message_text("❌ Ваш аккаунт заблокирован и вы не можете участвовать в аукционах")
+            try:
+                await query.edit_message_text("❌ Ваш аккаунт заблокирован и вы не можете участвовать в аукционах")
+            except Exception:
+                await query.message.reply_text("❌ Ваш аккаунт заблокирован и вы не можете участвовать в аукционах")
             return
         
         success = await self.auction_service.join_auction(auction_id, user_id)
@@ -1015,10 +1114,21 @@ class TelegramHandlers:
             auction = await self.auction_repo.get_auction(auction_id)
             message = await self._format_auction_message(auction)
             keyboard = self._get_auction_keyboard(auction_id, user_id in auction.participants)
-            keyboard.inline_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
-            await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
+            # Create new keyboard with additional button
+            new_keyboard = list(keyboard.inline_keyboard)
+            new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
+            keyboard = InlineKeyboardMarkup(new_keyboard)
+            
+            try:
+                await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
+            except Exception:
+                # If can't edit (media message), send new message
+                await query.message.reply_text(message, reply_markup=keyboard, parse_mode='Markdown')
         else:
-            await query.edit_message_text("❌ Не удалось присоединиться к аукциону")
+            try:
+                await query.edit_message_text("❌ Не удалось присоединиться к аукциону")
+            except Exception:
+                await query.message.reply_text("❌ Не удалось присоединиться к аукциону")
 
     async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle status button"""
@@ -1029,10 +1139,21 @@ class TelegramHandlers:
         auction = await self.auction_repo.get_auction(auction_id)
         
         if not auction:
-            await query.edit_message_text("❌ Аукцион не найден")
+            try:
+                await query.edit_message_text("❌ Аукцион не найден")
+            except Exception:
+                await query.message.reply_text("❌ Аукцион не найден")
             return
         
         message = await self._format_auction_message(auction)
         keyboard = self._get_auction_keyboard(auction_id, update.effective_user.id in auction.participants)
-        keyboard.inline_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
-        await query.edit_message_text(message, reply_markup=
+        # Create new keyboard with additional button
+        new_keyboard = list(keyboard.inline_keyboard)
+        new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
+        keyboard = InlineKeyboardMarkup(new_keyboard)
+        
+        try:
+            await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
+        except Exception:
+            # If can't edit (media message), send new message
+            await query.message.reply_text(message, reply_markup=keyboard, parse_mode='Markdown')

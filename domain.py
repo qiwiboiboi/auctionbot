@@ -5,14 +5,14 @@ Domain entities and business rules
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Set
 from uuid import UUID
 
 
 class AuctionStatus(Enum):
     """Possible auction states"""
     DRAFT = "draft"
-    ACTIVE = "active"
+    ACTIVE = "active" 
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     SCHEDULED = "scheduled"
@@ -23,21 +23,23 @@ class User:
     """User entity representing a registered bot user"""
     user_id: int
     username: str
-    telegram_handle: Optional[str] = None
+    telegram_username: Optional[str] = None
     first_name: Optional[str] = None
     last_name: Optional[str] = None
+    display_name: str = ""
     is_admin: bool = False
     is_blocked: bool = False
     created_at: datetime = field(default_factory=datetime.now)
     
-    @property
-    def display_name(self) -> str:
-        """Get display name for user"""
-        if self.first_name or self.last_name:
-            name_parts = [self.first_name or "", self.last_name or ""]
-            full_name = " ".join(part for part in name_parts if part).strip()
-            return f"{self.username} ({full_name})" if full_name else self.username
-        return self.username
+    def __post_init__(self):
+        """Set display name if not provided"""
+        if not self.display_name:
+            if self.first_name or self.last_name:
+                name_parts = [self.first_name or "", self.last_name or ""]
+                full_name = " ".join(part for part in name_parts if part).strip()
+                self.display_name = f"{self.username} ({full_name})" if full_name else self.username
+            else:
+                self.display_name = self.username
 
 
 @dataclass
@@ -46,9 +48,9 @@ class Bid:
     bid_id: UUID
     auction_id: UUID
     user_id: int
-    amount: float
-    created_at: datetime
     username: str
+    amount: float
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -57,26 +59,19 @@ class Auction:
     auction_id: UUID
     title: str
     description: Optional[str]
-    photo_url: Optional[str]
-    media_type: str
-    custom_message: Optional[str]
     start_price: float
     current_price: float
     status: AuctionStatus
     creator_id: int
-    participants: List[int]
-    bids: List[Bid]
-    created_at: datetime
+    photo_url: Optional[str] = None
+    media_type: str = "photo"
+    custom_message: Optional[str] = None
+    duration_hours: int = 0
     end_time: Optional[datetime] = None
-    winner_id: Optional[int] = None
-    start_time: Optional[datetime] = None
-
-    @property
-    def current_leader(self) -> Optional[Bid]:
-        """Get the current highest bid"""
-        if not self.bids:
-            return None
-        return max(self.bids, key=lambda b: b.amount)
+    created_at: datetime = field(default_factory=datetime.now)
+    participants: Set[int] = field(default_factory=set)
+    bids: List[Bid] = field(default_factory=list)
+    current_leader: Optional[Bid] = None
 
     @property
     def is_active(self) -> bool:
@@ -93,7 +88,7 @@ class Auction:
     @property
     def time_remaining(self) -> Optional[str]:
         """Get formatted time remaining"""
-        if not self.end_time:
+        if not self.end_time or self.status != AuctionStatus.ACTIVE:
             return None
         remaining = self.end_time - datetime.now()
         if remaining.total_seconds() <= 0:
@@ -106,9 +101,11 @@ class Auction:
     @property
     def time_until_start(self) -> Optional[str]:
         """Get formatted time until auction starts"""
-        if not self.start_time:
+        if self.status != AuctionStatus.SCHEDULED:
             return None
-        remaining = self.start_time - datetime.now()
+        # For scheduled auctions, we calculate from creation time + delay
+        start_time = self.created_at + timedelta(minutes=1)
+        remaining = start_time - datetime.now()
         if remaining.total_seconds() <= 0:
             return "Готов к запуску"
         

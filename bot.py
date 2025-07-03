@@ -63,22 +63,24 @@ class TelegramBot:
         # Conversation handler for registration
         register_conv = ConversationHandler(
             entry_points=[
-                CommandHandler('register', self.handlers.register_start),
                 CallbackQueryHandler(self.handlers.register_username, pattern=r'^register_join_'),
-                CallbackQueryHandler(self.handlers.register_username, pattern=r'^register_start_')
+                CallbackQueryHandler(self.handlers.register_username, pattern=r'^register_start$')
             ],
             states={
                 BotStates.REGISTER_USERNAME: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.register_username)
                 ]
             },
-            fallbacks=[CommandHandler('cancel', self.handlers.cancel)],
+            fallbacks=[
+                CommandHandler('cancel', self.handlers.cancel),
+                MessageHandler(filters.Regex('^❌ Отмена$'), self.handlers.cancel)
+            ],
             per_message=False
         )
         
         # Conversation handler for auction creation
         create_conv = ConversationHandler(
-            entry_points=[MessageHandler(filters.Regex('^➕ Создать аукцион'), self.handlers.create_start)],
+            entry_points=[MessageHandler(filters.Regex('^➕ Создать аукцион$'), self.handlers.create_start)],
             states={
                 BotStates.CREATE_TITLE: [
                     MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.create_title)
@@ -104,7 +106,7 @@ class TelegramBot:
             },
             fallbacks=[
                 CommandHandler('cancel', self.handlers.cancel),
-                MessageHandler(filters.Regex('^❌ Отмена'), self.handlers.cancel)
+                MessageHandler(filters.Regex('^❌ Отмена$'), self.handlers.cancel)
             ],
             per_message=False
         )
@@ -119,7 +121,7 @@ class TelegramBot:
             },
             fallbacks=[
                 CommandHandler('cancel', self.handlers.cancel),
-                MessageHandler(filters.Regex('^❌ Отмена'), self.handlers.cancel)
+                MessageHandler(filters.Regex('^❌ Отмена$'), self.handlers.cancel)
             ],
             per_message=False
         )

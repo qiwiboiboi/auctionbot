@@ -6,34 +6,22 @@ import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Protocol
+from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
 from domain import User, Auction, Bid, AuctionStatus
 from repositories import UserRepository, AuctionRepository
 
 
-class NotificationService(Protocol):
-    """Notification service interface"""
-    async def notify_bid_placed(self, auction: Auction, new_bid: Bid) -> None: ...
-    async def notify_auction_ended(self, auction: Auction) -> None: ...
-    async def notify_bid_overtaken(self, auction: Auction, overtaken_user_id: int, new_bid: Bid) -> None: ...
-    async def notify_auction_started(self, auction: Auction) -> None: ...
-    async def broadcast_current_auction(self, auction: Auction, user_id: int) -> None: ...
-
-
 class AuctionService:
     """Main auction business logic service"""
     
-    def __init__(self, 
-                 user_repo: UserRepository, 
-                 auction_repo: AuctionRepository,
-                 notification_service: NotificationService):
+    def __init__(self, user_repo: UserRepository, auction_repo: AuctionRepository, notification_service=None):
         self.user_repo = user_repo
         self.auction_repo = auction_repo
         self.notification_service = notification_service
 
-    async def register_user(self, user_id: int, username: str, telegram_handle: Optional[str] = None, 
+    async def register_user(self, user_id: int, username: str, telegram_username: Optional[str] = None, 
                            first_name: Optional[str] = None, last_name: Optional[str] = None) -> bool:
         """Register a new user"""
         existing_user = await self.user_repo.get_user_by_username(username)
@@ -46,13 +34,13 @@ class AuctionService:
         user = User(
             user_id=user_id,
             username=username,
-            telegram_handle=telegram_handle,
+            telegram_username=telegram_username,
             first_name=first_name,
             last_name=last_name,
             is_admin=is_admin
         )
-        await self.user_repo.save_user(user)
-        return True
+        
+        return await self.user_repo.create_user(user)
 
     async def create_auction(self, creator_id: int, title: str, start_price: float, 
                            duration_hours: int, description: Optional[str] = None,
@@ -65,36 +53,30 @@ class AuctionService:
         active_auctions = await self.auction_repo.get_active_auctions()
         
         if active_auctions:
-            # Schedule auction for after current auctions end
-            latest_end_time = max((a.end_time for a in active_auctions if a.end_time), default=datetime.now())
-            start_time = latest_end_time + timedelta(minutes=1)  # Start 1 minute after previous ends
-            end_time = start_time + timedelta(hours=duration_hours) if duration_hours > 0 else None
+            # Schedule auction
             status = AuctionStatus.SCHEDULED
+            end_time = None
         else:
             # Start immediately
-            start_time = datetime.now()
-            end_time = start_time + timedelta(hours=duration_hours) if duration_hours > 0 else None
             status = AuctionStatus.ACTIVE
+            end_time = datetime.now() + timedelta(hours=duration_hours) if duration_hours > 0 else None
         
         auction = Auction(
             auction_id=auction_id,
             title=title,
             description=description,
-            photo_url=photo_url,
-            media_type=media_type,
-            custom_message=custom_message,
             start_price=start_price,
             current_price=start_price,
             status=status,
             creator_id=creator_id,
-            participants=[],
-            bids=[],
-            created_at=datetime.now(),
-            start_time=start_time,
+            photo_url=photo_url,
+            media_type=media_type,
+            custom_message=custom_message,
+            duration_hours=duration_hours,
             end_time=end_time
         )
         
-        await self.auction_repo.save_auction(auction)
+        await self.auction_repo.create_auction(auction)
         return auction_id
 
     async def activate_scheduled_auction(self, auction_id: UUID) -> bool:
@@ -103,12 +85,17 @@ class AuctionService:
         if not auction or auction.status != AuctionStatus.SCHEDULED:
             return False
         
+        # Update status to active and set end time
         auction.status = AuctionStatus.ACTIVE
-        await self.auction_repo.update_auction(auction)
+        if auction.duration_hours > 0:
+            auction.end_time = datetime.now() + timedelta(hours=auction.duration_hours)
         
-        # Notify users about new auction
-        await self.notification_service.notify_auction_started(auction)
-        return True
+        success = await self.auction_repo.update_auction_status(auction_id, AuctionStatus.ACTIVE)
+        
+        if success and self.notification_service:
+            await self.notification_service.notify_auction_started(auction)
+        
+        return success
 
     async def get_current_auction(self) -> Optional[Auction]:
         """Get the current active auction for users"""
@@ -130,11 +117,7 @@ class AuctionService:
         if not user or user.is_blocked:
             return False
         
-        if user_id not in auction.participants:
-            auction.participants.append(user_id)
-            await self.auction_repo.update_auction(auction)
-        
-        return True
+        return await self.auction_repo.add_participant(auction_id, user_id)
 
     async def place_bid(self, auction_id: UUID, user_id: int, amount: float) -> bool:
         """Place a bid on an auction"""
@@ -159,22 +142,22 @@ class AuctionService:
             bid_id=uuid4(),
             auction_id=auction_id,
             user_id=user_id,
-            amount=amount,
-            created_at=datetime.now(),
-            username=user.username
+            username=user.username,
+            amount=amount
         )
         
-        auction.bids.append(bid)
-        auction.current_price = amount
-        await self.auction_repo.update_auction(auction)
+        success = await self.auction_repo.add_bid(bid)
         
-        # Send notifications
-        await self.notification_service.notify_bid_placed(auction, bid)
+        if success and self.notification_service:
+            # Get updated auction data
+            updated_auction = await self.auction_repo.get_auction(auction_id)
+            if updated_auction:
+                await self.notification_service.notify_bid_placed(updated_auction, bid)
+                
+                if previous_leader and previous_leader.user_id != user_id:
+                    await self.notification_service.notify_bid_overtaken(updated_auction, previous_leader.user_id, bid)
         
-        if previous_leader and previous_leader.user_id != user_id:
-            await self.notification_service.notify_bid_overtaken(auction, previous_leader.user_id, bid)
-        
-        return True
+        return success
 
     async def end_auction(self, auction_id: UUID, admin_id: int) -> bool:
         """End an auction manually"""
@@ -186,14 +169,14 @@ class AuctionService:
         if not admin or not admin.is_admin:
             return False
         
-        auction.status = AuctionStatus.COMPLETED
-        leader = auction.current_leader
-        if leader:
-            auction.winner_id = leader.user_id
+        success = await self.auction_repo.update_auction_status(auction_id, AuctionStatus.COMPLETED)
         
-        await self.auction_repo.update_auction(auction)
-        await self.notification_service.notify_auction_ended(auction)
-        return True
+        if success and self.notification_service:
+            updated_auction = await self.auction_repo.get_auction(auction_id)
+            if updated_auction:
+                await self.notification_service.notify_auction_ended(updated_auction)
+        
+        return success
 
     async def get_user_status(self, user_id: int) -> Dict:
         """Get user status and participation info"""
@@ -361,49 +344,6 @@ class TelegramNotificationService:
                 except Exception as e:
                     logging.error(f"Failed to notify user {user.user_id} about new auction: {e}")
 
-    async def broadcast_current_auction(self, auction: Auction, user_id: int) -> None:
-        """Send current auction to specific user"""
-        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        
-        message = await self._format_auction_message(auction)
-        keyboard = self._get_auction_keyboard(auction.auction_id, user_id in auction.participants)
-        
-        try:
-            if auction.photo_url:
-                if auction.media_type == 'photo':
-                    await self.application.bot.send_photo(
-                        chat_id=user_id,
-                        photo=auction.photo_url,
-                        caption=message,
-                        parse_mode='Markdown',
-                        reply_markup=keyboard
-                    )
-                elif auction.media_type == 'video':
-                    await self.application.bot.send_video(
-                        chat_id=user_id,
-                        video=auction.photo_url,
-                        caption=message,
-                        parse_mode='Markdown',
-                        reply_markup=keyboard
-                    )
-                elif auction.media_type == 'animation':
-                    await self.application.bot.send_animation(
-                        chat_id=user_id,
-                        animation=auction.photo_url,
-                        caption=message,
-                        parse_mode='Markdown',
-                        reply_markup=keyboard
-                    )
-            else:
-                await self.application.bot.send_message(
-                    chat_id=user_id,
-                    text=message,
-                    reply_markup=keyboard,
-                    parse_mode='Markdown'
-                )
-        except Exception as e:
-            logging.error(f"Failed to send auction to user {user_id}: {e}")
-
     async def _format_auction_message(self, auction: Auction) -> str:
         """Format auction information message"""
         message = f"🎯 *{auction.title}*\n\n"
@@ -486,13 +426,11 @@ class AuctionScheduler:
         
         for auction in auctions:
             if auction.end_time and now >= auction.end_time:
-                auction.status = AuctionStatus.COMPLETED
-                leader = auction.current_leader
-                if leader:
-                    auction.winner_id = leader.user_id
-                
-                await self.auction_repo.update_auction(auction)
-                await self.auction_service.notification_service.notify_auction_ended(auction)
+                success = await self.auction_repo.update_auction_status(auction.auction_id, AuctionStatus.COMPLETED)
+                if success and self.auction_service.notification_service:
+                    updated_auction = await self.auction_repo.get_auction(auction.auction_id)
+                    if updated_auction:
+                        await self.auction_service.notification_service.notify_auction_ended(updated_auction)
                 logging.info(f"Auto-ended auction: {auction.title}")
 
     async def _check_scheduled_auctions(self):
@@ -503,7 +441,8 @@ class AuctionScheduler:
             if scheduled_auctions:
                 # Activate the first scheduled auction
                 next_auction = scheduled_auctions[0]
-                now = datetime.now()
-                if now >= next_auction.start_time:
+                # Check if enough time has passed (1 minute delay)
+                time_since_creation = datetime.now() - next_auction.created_at
+                if time_since_creation >= timedelta(minutes=1):
                     await self.auction_service.activate_scheduled_auction(next_auction.auction_id)
                     logging.info(f"Auto-activated scheduled auction: {next_auction.title}")
