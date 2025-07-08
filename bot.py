@@ -10,6 +10,7 @@ from telegram.ext import (
 
 from repositories import SQLiteUserRepository, SQLiteAuctionRepository
 from services import AuctionService, TelegramNotificationService
+# Импортируем из папки handlers
 from handlers import TelegramHandlers, BotStates
 
 
@@ -126,7 +127,7 @@ class TelegramBot:
             per_message=False
         )
         
-        # Add conversation handlers
+        # Add conversation handlers FIRST (highest priority)
         application.add_handler(register_conv)
         application.add_handler(create_conv)  
         application.add_handler(bid_conv)
@@ -137,5 +138,5 @@ class TelegramBot:
         # Callback query handlers - handle all callbacks through one handler
         application.add_handler(CallbackQueryHandler(self.handlers.handle_callback))
         
-        # Text message handlers for keyboard buttons
+        # Text message handlers for keyboard buttons (lowest priority)
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.handle_text))
