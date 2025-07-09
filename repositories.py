@@ -48,6 +48,18 @@ class AuctionRepository:
     async def update_auction_status(self, auction_id: UUID, status: AuctionStatus) -> bool:
         pass
     
+    async def update_auction_status_and_end_time(self, auction_id: UUID, status: AuctionStatus, end_time: datetime) -> bool:
+        pass
+    
+    async def update_auction_title(self, auction_id: UUID, title: str) -> bool:
+        pass
+    
+    async def update_auction_description(self, auction_id: UUID, description: str) -> bool:
+        pass
+    
+    async def update_auction_price(self, auction_id: UUID, price: float) -> bool:
+        pass
+    
     async def get_active_auctions(self) -> List[Auction]:
         pass
     
@@ -296,6 +308,46 @@ class SQLiteAuctionRepository(AuctionRepository):
         try:
             async with aiosqlite.connect(self.db_path) as db:
                 await db.execute("UPDATE auctions SET status = ? WHERE auction_id = ?", (status.value, str(auction_id)))
+                await db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def update_auction_status_and_end_time(self, auction_id: UUID, status: AuctionStatus, end_time: datetime) -> bool:
+        """Update auction status and end time"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("UPDATE auctions SET status = ?, end_time = ? WHERE auction_id = ?", (status.value, end_time, str(auction_id)))
+                await db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def update_auction_title(self, auction_id: UUID, title: str) -> bool:
+        """Update auction title"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("UPDATE auctions SET title = ? WHERE auction_id = ?", (title, str(auction_id)))
+                await db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def update_auction_description(self, auction_id: UUID, description: str) -> bool:
+        """Update auction description"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("UPDATE auctions SET description = ? WHERE auction_id = ?", (description, str(auction_id)))
+                await db.commit()
+                return True
+        except Exception:
+            return False
+
+    async def update_auction_price(self, auction_id: UUID, price: float) -> bool:
+        """Update auction start and current price"""
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute("UPDATE auctions SET start_price = ?, current_price = ? WHERE auction_id = ?", (price, price, str(auction_id)))
                 await db.commit()
                 return True
         except Exception:

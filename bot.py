@@ -127,10 +127,52 @@ class TelegramBot:
             per_message=False
         )
         
+        # Conversation handler for broadcasting
+        broadcast_conv = ConversationHandler(
+            entry_points=[MessageHandler(filters.Regex('^📢 Рассылка$'), self.handlers.broadcast_start)],
+            states={
+                BotStates.BROADCAST_MESSAGE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.broadcast_message)
+                ]
+            },
+            fallbacks=[
+                CommandHandler('cancel', self.handlers.cancel),
+                MessageHandler(filters.Regex('^❌ Отмена$'), self.handlers.cancel)
+            ],
+            per_message=False
+        )
+        
+        # Conversation handler for auction editing
+        edit_conv = ConversationHandler(
+            entry_points=[
+                CallbackQueryHandler(self.handlers.edit_title_start, pattern=r'^edit_title_'),
+                CallbackQueryHandler(self.handlers.edit_description_start, pattern=r'^edit_description_'),
+                CallbackQueryHandler(self.handlers.edit_price_start, pattern=r'^edit_price_')
+            ],
+            states={
+                BotStates.EDIT_AUCTION_TITLE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.edit_title_input)
+                ],
+                BotStates.EDIT_AUCTION_DESCRIPTION: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.edit_description_input)
+                ],
+                BotStates.EDIT_AUCTION_PRICE: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, self.handlers.edit_price_input)
+                ]
+            },
+            fallbacks=[
+                CommandHandler('cancel', self.handlers.cancel),
+                MessageHandler(filters.Regex('^❌ Отмена$'), self.handlers.cancel)
+            ],
+            per_message=False
+        )
+        
         # Add conversation handlers FIRST (highest priority)
         application.add_handler(register_conv)
         application.add_handler(create_conv)  
         application.add_handler(bid_conv)
+        application.add_handler(broadcast_conv)
+        application.add_handler(edit_conv)
         
         # Command handlers
         application.add_handler(CommandHandler('start', self.handlers.start))

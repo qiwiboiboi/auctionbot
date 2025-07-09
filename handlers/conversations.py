@@ -16,7 +16,7 @@ except ImportError:
 
 
 class ConversationHandlers(BaseHandlers):
-    """Handlers for conversations (registration, auction creation, bidding)"""
+    """Handlers for conversations (registration, auction creation, bidding, editing, broadcasting)"""
 
     # ============ REGISTRATION HANDLERS ============
 
@@ -78,8 +78,15 @@ class ConversationHandlers(BaseHandlers):
                 await self.auction_service.join_auction(auction_id, update.effective_user.id)
                 auction = await self.auction_repo.get_auction(auction_id)
                 if auction:
-                    auction_message = await self._format_auction_message(auction)
-                    auction_keyboard = self._get_auction_keyboard(auction_id, True)
+                    # Show user keyboard first
+                    user_keyboard = self.get_user_keyboard()
+                    await update.message.reply_text(
+                        "🎯 Добро пожаловать в аукцион!",
+                        reply_markup=user_keyboard
+                    )
+                    
+                    auction_message = await self._format_auction_message(auction, is_admin=False)
+                    auction_keyboard = self._get_auction_keyboard(auction_id, True, is_admin=False)
                     
                     if auction.photo_url:
                         await self.send_auction_media(update, auction, auction_message, auction_keyboard)
@@ -97,7 +104,251 @@ class ConversationHandlers(BaseHandlers):
         context.user_data.clear()
         return ConversationHandler.END
 
-    # ============ CALLBACK HANDLERS (добавляем недостающие методы) ============
+    # ============ BROADCAST HANDLERS ============
+
+    async def broadcast_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start broadcast message creation"""
+        user = await self.user_repo.get_user(update.effective_user.id)
+        if not user or not user.is_admin:
+            await update.message.reply_text("❌ Только администраторы могут отправлять рассылки")
+            return ConversationHandler.END
+        
+        context.user_data['state'] = BotStates.BROADCAST_MESSAGE
+        await update.message.reply_text(
+            "📢 *Создание рассылки*\n\nВведите сообщение для отправки всем пользователям:",
+            parse_mode='Markdown',
+            reply_markup=self.get_cancel_keyboard()
+        )
+        return BotStates.BROADCAST_MESSAGE
+
+    async def broadcast_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle broadcast message input"""
+        if update.message.text == "❌ Отмена":
+            return await self.cancel(update, context)
+            
+        message = update.message.text.strip()
+        
+        # Send broadcast
+        success_count = await self.send_broadcast(message)
+        
+        await update.message.reply_text(
+            f"✅ Рассылка отправлена {success_count} пользователям",
+            reply_markup=self.get_admin_keyboard()
+        )
+        
+        # Clear state
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    async def send_broadcast(self, message: str) -> int:
+        """Send broadcast message to all users"""
+        all_users = await self.user_repo.get_all_users()
+        success_count = 0
+        
+        for user in all_users:
+            if user.is_blocked or user.is_admin:
+                continue
+                
+            try:
+                await self.auction_service.notification_service.application.bot.send_message(
+                    chat_id=user.user_id,
+                    text=f"📢 *Сообщение от администратора:*\n\n{message}",
+                    parse_mode='Markdown'
+                )
+                success_count += 1
+            except Exception:
+                # Log error but continue with other users
+                pass
+        
+        return success_count
+
+    # ============ EDIT AUCTION HANDLERS ============
+
+    async def edit_auction_select(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle auction selection for editing"""
+        query = update.callback_query
+        await query.answer()
+        
+        if query.data == "cancel_edit":
+            await query.edit_message_text("❌ Редактирование отменено")
+            return
+        
+        auction_id = UUID(query.data.split('_')[2])
+        auction = await self.auction_repo.get_auction(auction_id)
+        
+        if not auction:
+            await query.edit_message_text("❌ Аукцион не найден")
+            return
+        
+        # Show edit options
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✏️ Название", callback_data=f"edit_title_{auction_id}")],
+            [InlineKeyboardButton("📄 Описание", callback_data=f"edit_description_{auction_id}")],
+            [InlineKeyboardButton("💰 Стартовая цена", callback_data=f"edit_price_{auction_id}")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="cancel_edit")]
+        ])
+        
+        await query.edit_message_text(
+            f"✏️ *Редактирование аукциона:*\n\n"
+            f"🎯 {auction.title}\n"
+            f"📄 {auction.description or 'Без описания'}\n"
+            f"💰 Стартовая цена: {auction.start_price:,.0f}₽\n\n"
+            f"Выберите что изменить:",
+            parse_mode='Markdown',
+            reply_markup=keyboard
+        )
+
+    async def edit_title_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start editing auction title"""
+        query = update.callback_query
+        await query.answer()
+        
+        auction_id = UUID(query.data.split('_')[2])
+        context.user_data['edit_auction_id'] = auction_id
+        context.user_data['state'] = BotStates.EDIT_AUCTION_TITLE
+        
+        await query.edit_message_text("✏️ Введите новое название аукциона:")
+        return BotStates.EDIT_AUCTION_TITLE
+
+    async def edit_title_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle title edit input"""
+        if update.message.text == "❌ Отмена":
+            return await self.cancel(update, context)
+            
+        new_title = update.message.text.strip()
+        auction_id = context.user_data['edit_auction_id']
+        
+        success = await self.auction_service.edit_auction_title(auction_id, new_title)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ Название изменено на: *{new_title}*",
+                parse_mode='Markdown',
+                reply_markup=self.get_admin_keyboard()
+            )
+            
+            # Notify all participants about the change
+            await self.notify_auction_edited(auction_id, f"Название изменено на: {new_title}")
+        else:
+            await update.message.reply_text(
+                "❌ Ошибка при изменении названия",
+                reply_markup=self.get_admin_keyboard()
+            )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    async def edit_description_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start editing auction description"""
+        query = update.callback_query
+        await query.answer()
+        
+        auction_id = UUID(query.data.split('_')[2])
+        context.user_data['edit_auction_id'] = auction_id
+        context.user_data['state'] = BotStates.EDIT_AUCTION_DESCRIPTION
+        
+        await query.edit_message_text("📄 Введите новое описание аукциона:")
+        return BotStates.EDIT_AUCTION_DESCRIPTION
+
+    async def edit_description_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle description edit input"""
+        if update.message.text == "❌ Отмена":
+            return await self.cancel(update, context)
+            
+        new_description = update.message.text.strip()
+        auction_id = context.user_data['edit_auction_id']
+        
+        success = await self.auction_service.edit_auction_description(auction_id, new_description)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ Описание изменено",
+                reply_markup=self.get_admin_keyboard()
+            )
+            
+            # Notify all participants about the change
+            await self.notify_auction_edited(auction_id, f"Описание обновлено")
+        else:
+            await update.message.reply_text(
+                "❌ Ошибка при изменении описания",
+                reply_markup=self.get_admin_keyboard()
+            )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    async def edit_price_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start editing auction start price"""
+        query = update.callback_query
+        await query.answer()
+        
+        auction_id = UUID(query.data.split('_')[2])
+        auction = await self.auction_repo.get_auction(auction_id)
+        
+        if auction and auction.bids:
+            await query.edit_message_text("❌ Нельзя изменить стартовую цену после размещения ставок")
+            return
+        
+        context.user_data['edit_auction_id'] = auction_id
+        context.user_data['state'] = BotStates.EDIT_AUCTION_PRICE
+        
+        await query.edit_message_text("💰 Введите новую стартовую цену (в рублях):")
+        return BotStates.EDIT_AUCTION_PRICE
+
+    async def edit_price_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle price edit input"""
+        if update.message.text == "❌ Отмена":
+            return await self.cancel(update, context)
+            
+        try:
+            new_price = float(update.message.text.strip())
+            if new_price <= 0:
+                raise ValueError()
+                
+            auction_id = context.user_data['edit_auction_id']
+            success = await self.auction_service.edit_auction_price(auction_id, new_price)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ Стартовая цена изменена на: *{new_price:,.0f}₽*",
+                    parse_mode='Markdown',
+                    reply_markup=self.get_admin_keyboard()
+                )
+                
+                # Notify all participants about the change
+                await self.notify_auction_edited(auction_id, f"Стартовая цена изменена на: {new_price:,.0f}₽")
+            else:
+                await update.message.reply_text(
+                    "❌ Ошибка при изменении цены",
+                    reply_markup=self.get_admin_keyboard()
+                )
+        except ValueError:
+            await update.message.reply_text("❌ Введите корректную цену")
+            return BotStates.EDIT_AUCTION_PRICE
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    async def notify_auction_edited(self, auction_id: UUID, change_description: str):
+        """Notify all participants about auction edit"""
+        auction = await self.auction_repo.get_auction(auction_id)
+        if not auction:
+            return
+        
+        message = f"✏️ *Аукцион '{auction.title}' был изменен*\n\n{change_description}"
+        
+        # Notify all participants
+        for participant_id in auction.participants:
+            try:
+                await self.auction_service.notification_service.application.bot.send_message(
+                    chat_id=participant_id,
+                    text=message,
+                    parse_mode='Markdown'
+                )
+            except Exception:
+                pass
+
+    # ============ CALLBACK HANDLERS ============
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle all callback queries"""
@@ -108,27 +359,8 @@ class ConversationHandlers(BaseHandlers):
         user_id = update.effective_user.id
         user = await self.user_repo.get_user(user_id)
         
-        if data == "main_menu":
-            keyboard = self.get_main_menu_keyboard()
-            try:
-                await query.edit_message_text("📱 *Главное меню*\n\nВыберите действие:", parse_mode='Markdown', reply_markup=keyboard)
-            except Exception:
-                # If can't edit (e.g. media message), send new message
-                await query.message.reply_text("📱 *Главное меню*\n\nВыберите действие:", parse_mode='Markdown', reply_markup=keyboard)
-        
-        elif data == "menu_current_auction":
-            await self.show_current_auction_callback(query, context)
-        
-        elif data == "menu_profile":
-            await self.show_profile_callback(query, context)
-        
-        elif data == "menu_history":
-            await self.show_history_callback(query, context)
-        
-        elif data == "menu_help":
-            await self.show_help_callback(query, context)
-        
-        elif data.startswith("register_join_"):
+        # Handle only essential callbacks for auctions and admin actions
+        if data.startswith("register_join_"):
             auction_id = UUID(data.split('_')[2])
             context.user_data['join_auction_id'] = auction_id
             context.user_data['state'] = BotStates.REGISTER_USERNAME
@@ -152,9 +384,6 @@ class ConversationHandlers(BaseHandlers):
         elif data.startswith("bid_"):
             await self.bid_start(update, context)
         
-        elif data.startswith("status_"):
-            await self.show_status(update, context)
-        
         elif data.startswith("end_auction_"):
             await self.end_auction_callback(update, context)
         
@@ -164,11 +393,52 @@ class ConversationHandlers(BaseHandlers):
         elif data.startswith("block_") or data.startswith("unblock_"):
             await self.toggle_user_block(update, context)
         
+        elif data.startswith("edit_auction_"):
+            await self.edit_auction_select(update, context)
+        
+        elif data.startswith("edit_title_"):
+            return await self.edit_title_start(update, context)
+        
+        elif data.startswith("edit_description_"):
+            return await self.edit_description_start(update, context)
+        
+        elif data.startswith("edit_price_"):
+            return await self.edit_price_start(update, context)
+        
         elif data == "cancel_end":
             try:
                 await query.edit_message_text("❌ Завершение аукциона отменено")
             except Exception:
                 await query.message.reply_text("❌ Завершение аукциона отменено")
+        
+        elif data == "cancel_edit":
+            try:
+                await query.edit_message_text("❌ Редактирование отменено")
+            except Exception:
+                await query.message.reply_text("❌ Редактирование отменено")
+        
+        elif data == "back_to_users":
+            # Recreate users list
+            await self.show_users_callback(query, context)
+        
+        elif data == "cancel_users":
+            try:
+                await query.edit_message_text("✅ Закрыто")
+            except Exception:
+                await query.message.reply_text("✅ Закрыто")("edit_price_")
+            return await self.edit_price_start(update, context)
+        
+        elif data == "cancel_end":
+            try:
+                await query.edit_message_text("❌ Завершение аукциона отменено")
+            except Exception:
+                await query.message.reply_text("❌ Завершение аукциона отменено")
+        
+        elif data == "cancel_edit":
+            try:
+                await query.edit_message_text("❌ Редактирование отменено")
+            except Exception:
+                await query.message.reply_text("❌ Редактирование отменено")
         
         elif data == "back_to_users":
             # Recreate users list
@@ -188,8 +458,8 @@ class ConversationHandlers(BaseHandlers):
         user_id = query.from_user.id
         
         if current_auction:
-            message = await self._format_auction_message(current_auction)
-            keyboard = self._get_auction_keyboard(current_auction.auction_id, user_id in current_auction.participants)
+            message = await self._format_auction_message(current_auction, is_admin=False)
+            keyboard = self._get_auction_keyboard(current_auction.auction_id, user_id in current_auction.participants, is_admin=False)
             # Create new keyboard with additional button
             new_keyboard = list(keyboard.inline_keyboard)
             new_keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="main_menu")])
@@ -202,7 +472,7 @@ class ConversationHandlers(BaseHandlers):
         else:
             next_auction = await self.auction_service.get_next_scheduled_auction()
             if next_auction:
-                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction)
+                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction, is_admin=False)
             else:
                 message = "📭 Сейчас нет активных аукционов"
             
@@ -260,7 +530,7 @@ class ConversationHandlers(BaseHandlers):
                 
                 if auction.current_leader:
                     leader_user = await self.user_repo.get_user(auction.current_leader.user_id)
-                    leader_name = leader_user.display_name if leader_user else auction.current_leader.username
+                    leader_name = leader_user.username if leader_user else auction.current_leader.username
                     message += f"🏆 Победитель: {leader_name}\n"
                 
                 message += f"📅 {auction.created_at.strftime('%d.%m.%Y')}\n\n"
@@ -324,12 +594,8 @@ class ConversationHandlers(BaseHandlers):
         success = await self.auction_service.join_auction(auction_id, user_id)
         if success:
             auction = await self.auction_repo.get_auction(auction_id)
-            message = await self._format_auction_message(auction)
-            keyboard = self._get_auction_keyboard(auction_id, user_id in auction.participants)
-            # Create new keyboard with additional button
-            new_keyboard = list(keyboard.inline_keyboard)
-            new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
-            keyboard = InlineKeyboardMarkup(new_keyboard)
+            message = await self._format_auction_message(auction, is_admin=False)
+            keyboard = self._get_auction_keyboard(auction_id, user_id in auction.participants, is_admin=False)
             
             try:
                 await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
@@ -341,34 +607,6 @@ class ConversationHandlers(BaseHandlers):
                 await query.edit_message_text("❌ Не удалось присоединиться к аукциону")
             except Exception:
                 await query.message.reply_text("❌ Не удалось присоединиться к аукциону")
-
-    async def show_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle status button"""
-        query = update.callback_query
-        await query.answer()
-        
-        auction_id = UUID(query.data.split('_')[1])
-        auction = await self.auction_repo.get_auction(auction_id)
-        
-        if not auction:
-            try:
-                await query.edit_message_text("❌ Аукцион не найден")
-            except Exception:
-                await query.message.reply_text("❌ Аукцион не найден")
-            return
-        
-        message = await self._format_auction_message(auction)
-        keyboard = self._get_auction_keyboard(auction_id, update.effective_user.id in auction.participants)
-        # Create new keyboard with additional button
-        new_keyboard = list(keyboard.inline_keyboard)
-        new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
-        keyboard = InlineKeyboardMarkup(new_keyboard)
-        
-        try:
-            await query.edit_message_text(message, reply_markup=keyboard, parse_mode='Markdown')
-        except Exception:
-            # If can't edit (media message), send new message
-            await query.message.reply_text(message, reply_markup=keyboard, parse_mode='Markdown')
 
     # ============ ADMIN USER MANAGEMENT ============
 
@@ -388,8 +626,13 @@ class ConversationHandlers(BaseHandlers):
         for user_obj in users[:10]:  # Show first 10 users
             status_emoji = "🚫" if user_obj.is_blocked else "✅"
             admin_emoji = " 👑" if user_obj.is_admin else ""
+            # Show username with telegram link for admin
+            display_text = f"{status_emoji} {user_obj.display_name}{admin_emoji}"
+            if user_obj.telegram_username:
+                display_text += f" (@{user_obj.telegram_username})"
+            
             keyboard.append([InlineKeyboardButton(
-                f"{status_emoji} {user_obj.display_name}{admin_emoji}", 
+                display_text, 
                 callback_data=f"user_{user_obj.user_id}"
             )])
         
@@ -413,8 +656,13 @@ class ConversationHandlers(BaseHandlers):
         for user_obj in users[:10]:  # Show first 10 users
             status_emoji = "🚫" if user_obj.is_blocked else "✅"
             admin_emoji = " 👑" if user_obj.is_admin else ""
+            # Show username with telegram link for admin
+            display_text = f"{status_emoji} {user_obj.display_name}{admin_emoji}"
+            if user_obj.telegram_username:
+                display_text += f" (@{user_obj.telegram_username})"
+                
             keyboard.append([InlineKeyboardButton(
-                f"{status_emoji} {user_obj.display_name}{admin_emoji}", 
+                display_text, 
                 callback_data=f"user_{user_obj.user_id}"
             )])
         
@@ -456,16 +704,24 @@ class ConversationHandlers(BaseHandlers):
         block_text = "🔓 Разблокировать" if target_user.is_blocked else "🚫 Заблокировать"
         block_action = f"unblock_{user_id}" if target_user.is_blocked else f"block_{user_id}"
         
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(block_text, callback_data=block_action)],
-            [InlineKeyboardButton("◀️ Назад к списку", callback_data="back_to_users")]
-        ])
+        # Add contact button for admin
+        keyboard_buttons = [
+            [InlineKeyboardButton(block_text, callback_data=block_action)]
+        ]
+        
+        if target_user.telegram_username:
+            keyboard_buttons.append([InlineKeyboardButton("💬 Написать в ЛС", url=f"https://t.me/{target_user.telegram_username}")])
+        
+        keyboard_buttons.append([InlineKeyboardButton("◀️ Назад к списку", callback_data="back_to_users")])
+        keyboard = InlineKeyboardMarkup(keyboard_buttons)
         
         status = "🚫 Заблокирован" if target_user.is_blocked else "✅ Активен"
+        telegram_info = f"@{target_user.telegram_username}" if target_user.telegram_username else "Не указан"
         
         await query.edit_message_text(
             f"👤 *Пользователь*\n\n"
             f"Имя: {target_user.display_name}\n"
+            f"Telegram: {telegram_info}\n"
             f"Статус: {status}\n"
             f"Регистрация: {target_user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
             "Выберите действие:",
@@ -540,7 +796,7 @@ class ConversationHandlers(BaseHandlers):
             context.user_data['start_price'] = price
             context.user_data['state'] = BotStates.CREATE_DURATION
             await update.message.reply_text(
-                "⏰ Введите длительность аукциона в часах (или 0 для бесконечного):",
+                "⏰ Введите длительность аукциона в часах (минимум 1 час):",
                 reply_markup=self.get_cancel_keyboard()
             )
             return BotStates.CREATE_DURATION
@@ -555,8 +811,9 @@ class ConversationHandlers(BaseHandlers):
             
         try:
             duration = int(update.message.text.strip())
-            if duration < 0:
-                raise ValueError()
+            if duration < 1:  # Minimum 1 hour
+                await update.message.reply_text("❌ Минимальная длительность аукциона - 1 час")
+                return BotStates.CREATE_DURATION
             context.user_data['duration'] = duration
             context.user_data['state'] = BotStates.CREATE_DESCRIPTION
             await update.message.reply_text(
@@ -671,8 +928,8 @@ class ConversationHandlers(BaseHandlers):
                 
             try:
                 welcome_msg = auction.custom_message or "🎉 *Новый аукцион начался!*"
-                auction_message = await self._format_auction_message(auction)
-                keyboard = self._get_auction_keyboard(auction.auction_id, user.user_id in auction.participants)
+                auction_message = await self._format_auction_message(auction, is_admin=False)
+                keyboard = self._get_auction_keyboard(auction.auction_id, user.user_id in auction.participants, is_admin=False)
                 
                 await self.auction_service.notification_service.application.bot.send_message(
                     chat_id=user.user_id,
@@ -789,12 +1046,8 @@ class ConversationHandlers(BaseHandlers):
                 # Show updated auction
                 auction = await self.auction_repo.get_auction(auction_id)
                 if auction:
-                    message = await self._format_auction_message(auction)
-                    keyboard = self._get_auction_keyboard(auction_id, True)
-                    # Create new keyboard with additional button
-                    new_keyboard = list(keyboard.inline_keyboard)
-                    new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
-                    keyboard = InlineKeyboardMarkup(new_keyboard)
+                    message = await self._format_auction_message(auction, is_admin=False)
+                    keyboard = self._get_auction_keyboard(auction_id, True, is_admin=False)
                     
                     if auction.photo_url:
                         await self.send_auction_media(update, auction, message, keyboard)

@@ -66,19 +66,29 @@ class Auction:
     photo_url: Optional[str] = None
     media_type: str = "photo"
     custom_message: Optional[str] = None
-    duration_hours: int = 0
+    duration_hours: int = 1  # Minimum 1 hour, no more infinite auctions
     end_time: Optional[datetime] = None
     created_at: datetime = field(default_factory=datetime.now)
     participants: Set[int] = field(default_factory=set)
     bids: List[Bid] = field(default_factory=list)
     current_leader: Optional[Bid] = None
 
+    def __post_init__(self):
+        """Ensure all auctions have proper duration and end time"""
+        # Ensure minimum duration
+        if self.duration_hours < 1:
+            self.duration_hours = 1
+        
+        # Set end_time if not set and auction is active
+        if self.status == AuctionStatus.ACTIVE and self.end_time is None:
+            self.end_time = self.created_at + timedelta(hours=self.duration_hours)
+
     @property
     def is_active(self) -> bool:
         """Check if auction is currently active"""
         now = datetime.now()
         return (self.status == AuctionStatus.ACTIVE and 
-                (self.end_time is None or now < self.end_time))
+                self.end_time is not None and now < self.end_time)
 
     @property
     def is_scheduled(self) -> bool:
@@ -96,7 +106,11 @@ class Auction:
         
         hours = int(remaining.total_seconds() // 3600)
         minutes = int((remaining.total_seconds() % 3600) // 60)
-        return f"{hours}ч {minutes}м"
+        
+        if hours > 0:
+            return f"{hours}ч {minutes}м"
+        else:
+            return f"{minutes}м"
 
     @property
     def time_until_start(self) -> Optional[str]:
@@ -111,4 +125,8 @@ class Auction:
         
         hours = int(remaining.total_seconds() // 3600)
         minutes = int((remaining.total_seconds() % 3600) // 60)
-        return f"{hours}ч {minutes}м"
+        
+        if hours > 0:
+            return f"{hours}ч {minutes}м"
+        else:
+            return f"{minutes}м"

@@ -22,6 +22,10 @@ class BotStates:
     CREATE_CUSTOM_MESSAGE = 7
     PLACE_BID = 8
     ADMIN_ACTION = 9
+    BROADCAST_MESSAGE = 10
+    EDIT_AUCTION_TITLE = 11
+    EDIT_AUCTION_DESCRIPTION = 12
+    EDIT_AUCTION_PRICE = 13
 
 
 class BaseHandlers:
@@ -40,7 +44,8 @@ class BaseHandlers:
         keyboard = [
             [KeyboardButton("➕ Создать аукцион"), KeyboardButton("🏁 Завершить аукцион")],
             [KeyboardButton("📊 Статус аукционов"), KeyboardButton("📋 Отложенные аукционы")],
-            [KeyboardButton("👥 Список пользователей"),]
+            [KeyboardButton("👥 Список пользователей"), KeyboardButton("✏️ Редактировать аукцион")],
+            [KeyboardButton("📢 Рассылка"),]
         ]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
 
@@ -49,8 +54,16 @@ class BaseHandlers:
         keyboard = [[KeyboardButton("❌ Отмена")]]
         return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
+    def get_user_keyboard(self) -> ReplyKeyboardMarkup:
+        """Generate main keyboard for regular users"""
+        keyboard = [
+            [KeyboardButton("🎯 Текущий аукцион"), KeyboardButton("👤 Мой профиль")],
+            [KeyboardButton("📊 История"), KeyboardButton("ℹ️ Помощь")]
+        ]
+        return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=False)
+
     def get_main_menu_keyboard(self) -> InlineKeyboardMarkup:
-        """Generate main menu for users"""
+        """Generate inline menu for callbacks (deprecated, use get_user_keyboard instead)"""
         keyboard = [
             [InlineKeyboardButton("🎯 Текущий аукцион", callback_data="menu_current_auction")],
             [InlineKeyboardButton("👤 Мой профиль", callback_data="menu_profile")],
@@ -88,11 +101,9 @@ class BaseHandlers:
             # New user - show current auction with registration
             current_auction = await self.auction_service.get_current_auction()
             if current_auction:
-                auction_message = await self._format_auction_message(current_auction)
+                auction_message = await self._format_auction_message(current_auction, is_admin=False)
                 keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Участвовать", callback_data=f"register_join_{current_auction.auction_id}")
-                ], [
-                    InlineKeyboardButton("ℹ️ Обновить статус", callback_data=f"status_{current_auction.auction_id}")
                 ]])
                 
                 welcome_msg = current_auction.custom_message or "🎯 *Добро пожаловать в Аукцион-бот!*\n\nДля участия в аукционе необходимо зарегистрироваться."
@@ -119,41 +130,50 @@ class BaseHandlers:
         """Show current auction for regular user"""
         current_auction = await self.auction_service.get_current_auction()
         
+        # First show user keyboard
+        user_keyboard = self.get_user_keyboard()
+        
         if current_auction:
-            auction_message = await self._format_auction_message(current_auction)
-            keyboard = self._get_auction_keyboard(current_auction.auction_id, user.user_id in current_auction.participants)
-            # Create new keyboard with additional button
-            new_keyboard = list(keyboard.inline_keyboard)
-            new_keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
-            keyboard = InlineKeyboardMarkup(new_keyboard)
+            auction_message = await self._format_auction_message(current_auction, is_admin=False)
+            inline_keyboard = self._get_auction_keyboard(current_auction.auction_id, user.user_id in current_auction.participants, is_admin=False)
+            
+            # Send welcome message with user keyboard
+            await update.message.reply_text(
+                f"👋 Добро пожаловать, *{user.username}*!",
+                parse_mode='Markdown',
+                reply_markup=user_keyboard
+            )
             
             # Send media if available
             if current_auction.photo_url:
-                await self.send_auction_media(update, current_auction, auction_message, keyboard)
+                await self.send_auction_media(update, current_auction, auction_message, inline_keyboard)
             else:
-                await update.message.reply_text(auction_message, parse_mode='Markdown', reply_markup=keyboard)
+                await update.message.reply_text(auction_message, parse_mode='Markdown', reply_markup=inline_keyboard)
         else:
             # Show next scheduled auction if available
             next_auction = await self.auction_service.get_next_scheduled_auction()
             if next_auction:
-                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction)
-                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")]])
-                await update.message.reply_text(message, parse_mode='Markdown', reply_markup=keyboard)
+                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction, is_admin=False)
             else:
-                keyboard = self.get_main_menu_keyboard()
-                await update.message.reply_text("📭 Сейчас нет активных аукционов", reply_markup=keyboard)
+                message = "📭 Сейчас нет активных аукционов"
+            
+            await update.message.reply_text(
+                f"👋 Добро пожаловать, *{user.username}*!\n\n{message}",
+                parse_mode='Markdown',
+                reply_markup=user_keyboard
+            )
 
     async def show_current_auction_for_admin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show current auction status for admin"""
         current_auction = await self.auction_service.get_current_auction()
         
         if current_auction:
-            auction_message = await self._format_auction_message(current_auction)
+            auction_message = await self._format_auction_message(current_auction, is_admin=True)
             await update.message.reply_text(f"📊 *Текущий аукцион:*\n\n{auction_message}", parse_mode='Markdown')
         else:
             next_auction = await self.auction_service.get_next_scheduled_auction()
             if next_auction:
-                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction)
+                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction, is_admin=True)
                 await update.message.reply_text(message, parse_mode='Markdown')
 
     async def send_auction_media(self, update: Update, auction: Auction, caption: str, keyboard: InlineKeyboardMarkup):
@@ -173,7 +193,7 @@ class BaseHandlers:
 
     async def handle_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle text messages from keyboards - only if not in conversation"""
-        # Check if we're in a conversation state - ИСПРАВЛЕНИЕ ОСНОВНОЙ ПРОБЛЕМЫ
+        # Check if we're in a conversation state
         if context.user_data.get('state') is not None:
             # We're in a conversation, don't handle here
             return
@@ -202,6 +222,19 @@ class BaseHandlers:
             await self.show_scheduled_auctions(update, context)
         elif text == "👥 Список пользователей" and user.is_admin:
             await self.show_users(update, context)
+        elif text == "✏️ Редактировать аукцион" and user.is_admin:
+            await self.edit_auction_menu(update, context)
+        elif text == "📢 Рассылка" and user.is_admin:
+            # This will be handled by ConversationHandler
+            return
+        elif text == "🎯 Текущий аукцион" and not user.is_admin:
+            await self.show_current_auction_text(update, context)
+        elif text == "👤 Мой профиль" and not user.is_admin:
+            await self.show_profile_text(update, context)
+        elif text == "📊 История" and not user.is_admin:
+            await self.show_history_text(update, context)
+        elif text == "ℹ️ Помощь" and not user.is_admin:
+            await self.show_help_text(update, context)
         elif text == "❌ Отмена":
             # This will be handled by ConversationHandler
             return
@@ -209,9 +242,8 @@ class BaseHandlers:
             if user.is_admin:
                 await update.message.reply_text("Используйте кнопки меню для навигации.")
             else:
-                # For regular users, show main menu
-                keyboard = self.get_main_menu_keyboard()
-                await update.message.reply_text("Выберите действие:", reply_markup=keyboard)
+                # For regular users, remind about available buttons
+                await update.message.reply_text("Используйте кнопки меню для навигации.")
 
     async def cancel(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle conversation cancellation"""
@@ -229,10 +261,10 @@ class BaseHandlers:
                     reply_markup=keyboard
                 )
             else:
-                keyboard = self.get_main_menu_keyboard()
+                user_keyboard = self.get_user_keyboard()
                 await update.message.reply_text(
                     "❌ Операция отменена",
-                    reply_markup=keyboard
+                    reply_markup=user_keyboard
                 )
         else:
             await update.message.reply_text(
@@ -248,7 +280,7 @@ class BaseHandlers:
 
     # ============ UTILITY METHODS ============
 
-    async def _format_auction_message(self, auction: Auction) -> str:
+    async def _format_auction_message(self, auction: Auction, is_admin: bool = False) -> str:
         """Format auction information message"""
         message = f"🎯 *{auction.title}*\n\n"
         
@@ -261,7 +293,14 @@ class BaseHandlers:
         if leader:
             # Get user display name for leader
             leader_user = await self.user_repo.get_user(leader.user_id)
-            leader_name = leader_user.display_name if leader_user else leader.username
+            if is_admin and leader_user:
+                # For admin - show full info with telegram username
+                leader_name = leader_user.display_name
+                if leader_user.telegram_username:
+                    leader_name += f" (@{leader_user.telegram_username})"
+            else:
+                # For users - show only username without brackets
+                leader_name = leader_user.username if leader_user else leader.username
             message += f"👤 Лидер: {leader_name}\n"
         
         message += f"👥 Участников: {len(auction.participants)}\n"
@@ -275,11 +314,12 @@ class BaseHandlers:
         elif auction.time_remaining:
             message += f"⏰ Осталось: {auction.time_remaining}\n"
         else:
-            message += "⏰ Бессрочный\n"
+            # This should not happen - all auctions should have duration
+            message += "⚠️ Ошибка: время не установлено\n"
         
         return message
 
-    def _get_auction_keyboard(self, auction_id: UUID, is_participant: bool = False) -> InlineKeyboardMarkup:
+    def _get_auction_keyboard(self, auction_id: UUID, is_participant: bool = False, is_admin: bool = False) -> InlineKeyboardMarkup:
         """Generate auction inline keyboard"""
         keyboard = []
         
@@ -288,7 +328,7 @@ class BaseHandlers:
         else:
             keyboard.append([InlineKeyboardButton("💸 Перебить ставку", callback_data=f"bid_{auction_id}")])
         
-        keyboard.append([InlineKeyboardButton("ℹ️ Обновить статус", callback_data=f"status_{auction_id}")])
+        # Remove "Update Status" button as requested
         
         return InlineKeyboardMarkup(keyboard)
 
@@ -297,6 +337,8 @@ class BaseHandlers:
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Show auction status"""
         auctions = await self.auction_repo.get_active_auctions()
+        user = await self.user_repo.get_user(update.effective_user.id)
+        is_admin = user and user.is_admin
         
         if not auctions:
             # Show scheduled auctions if no active ones
@@ -321,7 +363,14 @@ class BaseHandlers:
                 if leader:
                     # Get user display name for leader
                     leader_user = await self.user_repo.get_user(leader.user_id)
-                    leader_name = leader_user.display_name if leader_user else leader.username
+                    if is_admin and leader_user:
+                        # For admin - show full info with telegram username
+                        leader_name = leader_user.display_name
+                        if leader_user.telegram_username:
+                            leader_name += f" (@{leader_user.telegram_username})"
+                    else:
+                        # For users - show only username
+                        leader_name = leader_user.username if leader_user else leader.username
                     message += f"👤 Лидер: {leader_name}\n"
                 
                 message += f"👥 Участников: {len(auction.participants)}\n"
@@ -329,7 +378,7 @@ class BaseHandlers:
                 if auction.time_remaining:
                     message += f"⏰ Осталось: {auction.time_remaining}\n"
                 else:
-                    message += "⏰ Бессрочный\n"
+                    message += "⚠️ Ошибка: время не установлено\n"
                 
                 message += "\n"
         
@@ -385,3 +434,119 @@ class BaseHandlers:
                 "Выберите аукцион для завершения:",
                 reply_markup=InlineKeyboardMarkup(keyboard)
             )
+
+    async def edit_auction_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show edit auction menu (admin only)"""
+        user = await self.user_repo.get_user(update.effective_user.id)
+        if not user or not user.is_admin:
+            await update.message.reply_text("❌ Только администраторы могут редактировать аукционы")
+            return
+        
+        auctions = await self.auction_repo.get_active_auctions()
+        if not auctions:
+            await update.message.reply_text("📭 Нет активных аукционов для редактирования")
+            return
+        
+        keyboard = []
+        for auction in auctions:
+            keyboard.append([InlineKeyboardButton(
+                f"✏️ {auction.title}", 
+                callback_data=f"edit_auction_{auction.auction_id}"
+            )])
+        keyboard.append([InlineKeyboardButton("❌ Отмена", callback_data="cancel_edit")])
+        
+        await update.message.reply_text(
+            "Выберите аукцион для редактирования:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    # ============ TEXT HANDLERS FOR USERS ============
+
+    async def show_current_auction_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current auction for user from text button"""
+        current_auction = await self.auction_service.get_current_auction()
+        user_id = update.effective_user.id
+        
+        if current_auction:
+            message = await self._format_auction_message(current_auction, is_admin=False)
+            keyboard = self._get_auction_keyboard(current_auction.auction_id, user_id in current_auction.participants, is_admin=False)
+            
+            if current_auction.photo_url:
+                await self.send_auction_media(update, current_auction, message, keyboard)
+            else:
+                await update.message.reply_text(message, reply_markup=keyboard, parse_mode='Markdown')
+        else:
+            next_auction = await self.auction_service.get_next_scheduled_auction()
+            if next_auction:
+                message = f"⏳ *Следующий аукцион:*\n\n" + await self._format_auction_message(next_auction, is_admin=False)
+            else:
+                message = "📭 Сейчас нет активных аукционов"
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+
+    async def show_profile_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show user profile from text button"""
+        status = await self.auction_service.get_user_status(update.effective_user.id)
+        
+        if not status["registered"]:
+            await update.message.reply_text("❌ Ошибка получения профиля")
+            return
+        
+        user = status["user"]
+        message = f"👤 *Ваш профиль*\n\n"
+        message += f"Логин: {user.username}\n"
+        message += f"Имя: {user.display_name}\n"
+        message += f"Статус: {'👑 Администратор' if user.is_admin else '👤 Участник'}\n"
+        message += f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+        
+        if status["participating_in"]:
+            message += "📊 *Участие в аукционах:*\n"
+            for participation in status["participating_in"]:
+                auction = participation["auction"]
+                user_bid = participation["user_bid"]
+                is_leader = participation["is_leader"]
+                
+                message += f"\n🎯 {auction.title}\n"
+                if user_bid:
+                    message += f"Ваша ставка: {user_bid.amount:,.0f}₽\n"
+                    message += f"Статус: {'🏆 Лидер' if is_leader else '👤 Участник'}\n"
+                else:
+                    message += "Ставок нет\n"
+        else:
+            message += "Вы не участвуете в аукционах"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+    async def show_history_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show auction history from text button"""
+        completed_auctions = await self.auction_repo.get_completed_auctions()
+        
+        if not completed_auctions:
+            message = "📭 История аукционов пуста"
+        else:
+            message = "📊 *История аукционов:*\n\n"
+            for auction in completed_auctions[:5]:  # Show last 5
+                message += f"🎯 *{auction.title}*\n"
+                message += f"💰 Итоговая цена: {auction.current_price:,.0f}₽\n"
+                
+                if auction.current_leader:
+                    leader_user = await self.user_repo.get_user(auction.current_leader.user_id)
+                    leader_name = leader_user.username if leader_user else auction.current_leader.username
+                    message += f"🏆 Победитель: {leader_name}\n"
+                
+                message += f"📅 {auction.created_at.strftime('%d.%m.%Y')}\n\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+
+    async def show_help_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show help from text button"""
+        message = (
+            "ℹ️ *Помощь по боту*\n\n"
+            "🎯 *Текущий аукцион* - показать активный аукцион\n"
+            "👤 *Мой профиль* - ваша информация и статистика\n"
+            "📊 *История* - прошлые аукционы\n\n"
+            "Для участия в аукционе нажмите '✅ Участвовать', "
+            "затем используйте '💸 Перебить ставку' для размещения ставок."
+        )
+        
+        await update.message.reply_text(message, parse_mode='Markdown')

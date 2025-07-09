@@ -59,7 +59,7 @@ class AuctionService:
         else:
             # Start immediately
             status = AuctionStatus.ACTIVE
-            end_time = datetime.now() + timedelta(hours=duration_hours) if duration_hours > 0 else None
+            end_time = datetime.now() + timedelta(hours=duration_hours)
         
         auction = Auction(
             auction_id=auction_id,
@@ -87,10 +87,9 @@ class AuctionService:
         
         # Update status to active and set end time
         auction.status = AuctionStatus.ACTIVE
-        if auction.duration_hours > 0:
-            auction.end_time = datetime.now() + timedelta(hours=auction.duration_hours)
+        auction.end_time = datetime.now() + timedelta(hours=auction.duration_hours)
         
-        success = await self.auction_repo.update_auction_status(auction_id, AuctionStatus.ACTIVE)
+        success = await self.auction_repo.update_auction_status_and_end_time(auction_id, AuctionStatus.ACTIVE, auction.end_time)
         
         if success and self.notification_service:
             await self.notification_service.notify_auction_started(auction)
@@ -156,6 +155,9 @@ class AuctionService:
                 
                 if previous_leader and previous_leader.user_id != user_id:
                     await self.notification_service.notify_bid_overtaken(updated_auction, previous_leader.user_id, bid)
+                
+                # Notify admin about new bid
+                await self.notification_service.notify_admin_bid_placed(updated_auction, bid)
         
         return success
 
@@ -177,6 +179,22 @@ class AuctionService:
                 await self.notification_service.notify_auction_ended(updated_auction)
         
         return success
+
+    async def edit_auction_title(self, auction_id: UUID, new_title: str) -> bool:
+        """Edit auction title"""
+        return await self.auction_repo.update_auction_title(auction_id, new_title)
+
+    async def edit_auction_description(self, auction_id: UUID, new_description: str) -> bool:
+        """Edit auction description"""
+        return await self.auction_repo.update_auction_description(auction_id, new_description)
+
+    async def edit_auction_price(self, auction_id: UUID, new_price: float) -> bool:
+        """Edit auction start price (only if no bids placed)"""
+        auction = await self.auction_repo.get_auction(auction_id)
+        if not auction or auction.bids:
+            return False
+        
+        return await self.auction_repo.update_auction_price(auction_id, new_price)
 
     async def get_user_status(self, user_id: int) -> Dict:
         """Get user status and participation info"""
@@ -242,6 +260,32 @@ class TelegramNotificationService:
         except Exception as e:
             logging.error(f"Failed to notify bid author {new_bid.user_id}: {e}")
 
+    async def notify_admin_bid_placed(self, auction: Auction, new_bid: Bid) -> None:
+        """Notify admin about new bid"""
+        if not self.user_repo:
+            return
+            
+        # Get all admins
+        all_users = await self.user_repo.get_all_users()
+        admin_users = [user for user in all_users if user.is_admin]
+        
+        message = f"📊 *Новая ставка в аукционе*\n\n"
+        message += f"🎯 Аукцион: {auction.title}\n"
+        message += f"👤 Участник: {new_bid.username}\n"
+        message += f"💰 Ставка: *{new_bid.amount:,.0f}₽*\n"
+        message += f"👥 Участников: {len(auction.participants)}\n"
+        message += f"📊 Всего ставок: {len(auction.bids)}"
+        
+        for admin in admin_users:
+            try:
+                await self.application.bot.send_message(
+                    chat_id=admin.user_id,
+                    text=message,
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logging.error(f"Failed to notify admin {admin.user_id}: {e}")
+
     async def notify_bid_overtaken(self, auction: Auction, overtaken_user_id: int, new_bid: Bid) -> None:
         """Notify user their bid was overtaken"""
         try:
@@ -285,6 +329,27 @@ class TelegramNotificationService:
                 )
             except Exception as e:
                 logging.error(f"Failed to notify participant {participant_id}: {e}")
+
+        # Notify admin about auction end
+        if self.user_repo:
+            all_users = await self.user_repo.get_all_users()
+            admin_users = [user for user in all_users if user.is_admin]
+            
+            admin_message = f"📊 *Аукцион завершён*\n\n{message}"
+            if winner:
+                admin_message += f"\n\n📞 Связаться с победителем:"
+                if winner_user and winner_user.telegram_username:
+                    admin_message += f"\n@{winner_user.telegram_username}"
+            
+            for admin in admin_users:
+                try:
+                    await self.application.bot.send_message(
+                        chat_id=admin.user_id,
+                        text=admin_message,
+                        parse_mode='Markdown'
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to notify admin {admin.user_id}: {e}")
 
     async def notify_auction_started(self, auction: Auction) -> None:
         """Notify all users about new auction"""
@@ -355,10 +420,10 @@ class TelegramNotificationService:
         
         leader = auction.current_leader
         if leader:
-            # Get user display name if possible
+            # Get user display name if possible - show only username for users
             if self.user_repo:
                 leader_user = await self.user_repo.get_user(leader.user_id)
-                leader_name = leader_user.display_name if leader_user else leader.username
+                leader_name = leader_user.username if leader_user else leader.username
             else:
                 leader_name = leader.username
             message += f"👤 Лидер: {leader_name}\n"
@@ -374,7 +439,7 @@ class TelegramNotificationService:
         elif auction.time_remaining:
             message += f"⏰ Осталось: {auction.time_remaining}\n"
         else:
-            message += "⏰ Бессрочный\n"
+            message += "⚠️ Ошибка: время не установлено\n"
         
         return message
 
@@ -388,9 +453,6 @@ class TelegramNotificationService:
             keyboard.append([InlineKeyboardButton("✅ Участвовать", callback_data=f"join_{auction_id}")])
         else:
             keyboard.append([InlineKeyboardButton("💸 Перебить ставку", callback_data=f"bid_{auction_id}")])
-        
-        keyboard.append([InlineKeyboardButton("ℹ️ Обновить статус", callback_data=f"status_{auction_id}")])
-        keyboard.append([InlineKeyboardButton("📱 Главное меню", callback_data="main_menu")])
         
         return InlineKeyboardMarkup(keyboard)
 
