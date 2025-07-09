@@ -493,7 +493,7 @@ class ConversationHandlers(BaseHandlers):
         user = status["user"]
         message = f"👤 *Ваш профиль*\n\n"
         message += f"Логин: {user.username}\n"
-        message += f"Имя: {user.display_name}\n"
+        message += f"Имя: {user.username}\n"  # Show username instead of display_name
         message += f"Статус: {'👑 Администратор' if user.is_admin else '👤 Участник'}\n"
         message += f"Регистрация: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n\n"
         

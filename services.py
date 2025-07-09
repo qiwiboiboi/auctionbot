@@ -307,7 +307,8 @@ class TelegramNotificationService:
             # Get winner display name
             if self.user_repo:
                 winner_user = await self.user_repo.get_user(winner.user_id)
-                winner_name = winner_user.display_name if winner_user else winner.username
+                # Для обычных пользователей показываем только username
+                winner_name = winner_user.username if winner_user else winner.username
             else:
                 winner_name = winner.username
             
@@ -335,11 +336,27 @@ class TelegramNotificationService:
             all_users = await self.user_repo.get_all_users()
             admin_users = [user for user in all_users if user.is_admin]
             
-            admin_message = f"📊 *Аукцион завершён*\n\n{message}"
+            # Для админов показываем полную информацию с телеграм username
+            admin_winner_name = winner_name  # базовое имя
+            if winner and winner_user:
+                admin_winner_name = winner_user.display_name
+                if winner_user.telegram_username:
+                    admin_winner_name += f" (@{winner_user.telegram_username})"
+            
+            admin_message = f"📊 *Аукцион завершён*\n\n"
+            admin_message += f"🎯 Аукцион: {auction.title}\n\n"
+            
             if winner:
-                admin_message += f"\n\n📞 Связаться с победителем:"
-                if winner_user and winner_user.telegram_username:
-                    admin_message += f"\n@{winner_user.telegram_username}"
+                admin_message += f"🏆 Победитель: {admin_winner_name}\n"
+                admin_message += f"💰 Итоговая ставка: *{winner.amount:,.0f}₽*\n"
+            else:
+                admin_message += "❌ Ставок не было\n"
+            
+            admin_message += f"👥 Участников: {len(auction.participants)}\n"
+            admin_message += f"📊 Всего ставок: {len(auction.bids)}"
+            
+            if winner and winner_user and winner_user.telegram_username:
+                admin_message += f"\n\n📞 Связаться с победителем: @{winner_user.telegram_username}"
             
             for admin in admin_users:
                 try:

@@ -176,13 +176,15 @@ class TelegramHandlers(ConversationHandlers):
                 
                 if auction.current_leader:
                     leader_user = await self.user_repo.get_user(auction.current_leader.user_id)
-                    leader_name = leader_user.display_name if leader_user else auction.current_leader.username
+                    # Show only username for regular users  
+                    leader_name = leader_user.username if leader_user else auction.current_leader.username
                     message += f"🏆 Победитель: {leader_name}\n"
                 
                 message += f"📅 {auction.created_at.strftime('%d.%m.%Y')}\n\n"
         
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="main_menu")]])
         await query.edit_message_text(message, parse_mode='Markdown', reply_markup=keyboard)
+
 
     async def show_help_callback(self, query, context):
         """Show help from callback"""
